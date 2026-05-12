@@ -2,7 +2,7 @@
 #
 # Usage: ./launch.sh <mode> <model_size> [steps] [nodes]
 #
-# Modes:     throughput  (50 steps, no logging)
+# Modes:     throughput  (50 steps, with W&B)
 #            train       (N steps, with W&B and Tensorboard)
 #
 # Sizes:     125m, 350m, 760m, 1.5b, 3b, 8b
@@ -17,6 +17,8 @@
 
 set -euo pipefail
 
+source "$(dirname "$0")/config.sh"
+
 MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 
@@ -30,7 +32,7 @@ case $MODE in
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
         LOGGING_EXTRA=""
-        WANDB=false
+        WANDB=true
         ;;
     train)
         TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes]}
@@ -131,6 +133,7 @@ SBATCH_DIRECTIVES
 
 cat >> "$SCRIPT" << BODY
 
+echo "START TIME: \$(date)"
 echo "START TIME: \$(date)"
 
 ################ Configs ################

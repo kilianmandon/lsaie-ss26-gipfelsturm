@@ -1,0 +1,10 @@
+# Copy this file to config.sh and fill in your values.
+# config.sh is git-ignored so your personal paths are never committed.
+
+export WORKDIR="/iopsstor/scratch/cscs/your_cscs_account/gipfelsturm"
+
+# The SBATCH_ACCOUNT variable name is reserved by Slurm and automatically passed
+# as the account to sbatch.
+export SBATCH_ACCOUNT="lsaie-ss26"
+
+export WANDB_API_KEY=""

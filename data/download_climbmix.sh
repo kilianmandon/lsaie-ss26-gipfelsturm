@@ -3,8 +3,10 @@
 # Run directly on the login node: bash data/download_climbmix.sh
 set -euo pipefail
 
+source "$(dirname "$0")/../config.sh"
+
 DATA_DIR="/capstor/store/cscs/swissai/infra01/datasets/nvidia/Nemotron-ClimbMix/climbmix_small"
-LOGFILE="/users/schlag/gipfelsturm/data/download_climbmix.log"
+LOGFILE="$WORKDIR/data/download_climbmix.log"
 
 mkdir -p "$DATA_DIR"
 

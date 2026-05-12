@@ -33,6 +33,50 @@ Achieve the highest tokens/sec/GPU for a given model size on up to 8 nodes (32 G
 | Single-Node | ~32B | Intra-node tensor parallelism (TP=4) |
 | Multi-Node | ~140B | Pipeline parallelism across nodes (TP=4, PP=4) |
 
+## Setup
+
+**1. Configure your paths:**
+
+```bash
+cp config.sh.example config.sh
+# Edit config.sh: set WORKDIR (your scratch directory), SBATCH_ACCOUNT (your SLURM account), and WANDB_API_KEY (optional)
+source config.sh
+```
+
+`config.sh` is git-ignored; the example file is committed as a template.
+
+**2. Initialize the Megatron-LM submodule:**
+
+The `Megatron-LM/` directory is empty after cloning. Remove any leftover files and initialize:
+
+```bash
+rm -rf Megatron-LM
+git submodule update --init
+```
+
+**3. Set up the EDF container environment:**
+
+Copy [`alps3.toml`](alps3.toml) to `~/.edf/` and update `workdir` to your home directory:
+
+```bash
+mkdir -p ~/.edf
+sed "s|workdir = .*|workdir = \"$HOME\"|" alps3.toml > ~/.edf/alps3.toml
+```
+
+**4. Verify the infrastructure:**
+
+```bash
+sbatch test-infra.sbatch
+```
+
+**5. Benchmark Megatron-LM training throughput:**
+
+Run a `125m` model benchmark with 50 steps on a single node:
+
+```bash
+./launch.sh throughput 125m 50 1
+```
+
 ## Container Image
 
 We use the **alps3** extended image based on NGC PyTorch 26.01-py3:
@@ -101,7 +145,7 @@ All training is launched via `launch.sh <mode> <model_size> [steps] [nodes]`. Th
 
 ### Logging
 
-- **W&B**: Enabled automatically if `WANDB_API_KEY` is set in your shell environment on Clariden. Add `export WANDB_API_KEY=<your-key>` to your `~/.bashrc`.
+- **W&B**: Enabled automatically if `WANDB_API_KEY` is set in `config.sh`, or in your shell environment on Clariden. Add `export WANDB_API_KEY=<your-key>` to your `~/.bashrc`.
 - **Tensorboard**: Written to `/iopsstor/scratch/cscs/$USER/gipfelsturm/<project>/<exp>/tensorboard/`
 - **Checkpoints**: Saved to `/iopsstor/scratch/cscs/$USER/gipfelsturm/<project>/<exp>/checkpoints/` (`torch` format). Currently disabled due to a [known SIGSEGV bug](https://github.com/NVIDIA/Megatron-LM/issues/1861) in checkpoint saving on GH200/ARM64. Note: iopsstor scratch has a three-week deletion policy.
 

@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=parquet-to-megatron
-#SBATCH --account=infra01
 #SBATCH --partition=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -8,7 +7,7 @@
 #SBATCH --output=logs/convert_data_%j.log
 #SBATCH --error=logs/convert_data_%j.log
 
-WORKDIR=/users/schlag/gipfelsturm
+WORKDIR=${WORKDIR:-$SLURM_SUBMIT_DIR}
 INPUT=/capstor/store/cscs/swissai/infra01/datasets/nvidia/Nemotron-ClimbMix/climbmix_small
 OUTPUT=/capstor/store/cscs/swissai/infra01/datasets/nvidia/Nemotron-ClimbMix/climbmix_small_megatron/climbmix_small
 
