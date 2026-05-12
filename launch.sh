@@ -115,7 +115,8 @@ cat > "$SCRIPT" << 'HEADER'
 HEADER
 
 cat >> "$SCRIPT" << SBATCH_DIRECTIVES
-#SBATCH --account=infra01
+#SBATCH --account=lsaie-ss26
+#SBATCH --partition=normal
 #SBATCH --time=${TIME}
 #SBATCH --job-name=${JOB_NAME}
 #SBATCH --output=logs/%x-%j.log
@@ -128,15 +129,15 @@ cat >> "$SCRIPT" << SBATCH_DIRECTIVES
 #SBATCH --no-requeue
 SBATCH_DIRECTIVES
 
-cat >> "$SCRIPT" << 'BODY'
+cat >> "$SCRIPT" << BODY
 
-echo "START TIME: $(date)"
+echo "START TIME: \$(date)"
 
 ################ Configs ################
-WORKDIR=/users/schlag/gipfelsturm
-MEGATRON_LM_DIR=$WORKDIR/Megatron-LM
+WORKDIR="$(pwd)"
+MEGATRON_LM_DIR=\$WORKDIR/Megatron-LM
 DATA_PREFIX=/capstor/store/cscs/swissai/infra01/datasets/nvidia/Nemotron-ClimbMix/climbmix_small_megatron/climbmix_small
-DATASET_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/cache
+DATASET_CACHE_DIR=/iopsstor/scratch/cscs/\$USER/gipfelsturm/cache
 BODY
 
 cat >> "$SCRIPT" << CONFIGS
@@ -319,4 +320,4 @@ FOOTER
 chmod +x "$SCRIPT"
 
 echo "Generated: $SCRIPT"
-sbatch "$SCRIPT"
+# sbatch "$SCRIPT"

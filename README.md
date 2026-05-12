@@ -1,3 +1,12 @@
+# Info on our group's project
+Current plan for our structuring is as such: `launch_with_config.py` is basically a copy of the `launch.sh` script that the course provided, but it accepts a config as argument, e.g.
+```bash
+python launch_with_config.py throughput 3b -n 1 -c kilian_runs/configs/config_transformer_engine_fp8.yaml
+```
+to launch the 3b model on one node with the specific config. If you want to do experiments, I suggest you make edits in `launch_with_config.py` so that the launch configuration is using your config options the way you want, then create config files for the different settings you want to test, and run the script with all your different configs. The script generates and executes the corresponding sbatch file. 
+
+All output on throughput and such can then be found in the log files, and we can extract it later for visualizations and stuff.
+
 # Gipfelsturm
 
 *Gipfelsturm* (German: "summit attempt"), a race to *peak performance*. Inspired by nanoGPT/nanochat which are educational single-node setups, Gipfelsturm focuses on distributed LLM training on production-grade infrastructure. We use [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), the de facto industry standard for distributed LLM training, running on the [CSCS Alps supercomputer](https://arxiv.org/abs/2507.02404) with [GH200 compute nodes connected via Slingshot-11](https://arxiv.org/abs/2408.11556).
@@ -34,7 +43,7 @@ jfrog.svc.cscs.ch/docker-group-csstaff/alps-images/ngc-pytorch:26.01-py3-alps3
 
 Includes: NCCL 2.29.3-1 (patched), libfabric 2.5.0a1, OpenMPI 5.0.9, nvshmem 3.4.5-0.
 
-See [Alps Extended Images](https://docs.cscs.ch/software/alps-extended-images/) for details. A working EDF environment is provided in [`alps3.toml`](alps3.toml) (copy to `~/.edf/` on Clariden).
+See [Alps Extended Images](https://docs.cscs.ch/software/alps-extended-images/) for details. A working EDF environment is provided in [`alps3.toml`](alps3.toml) (copy to `~/.edf/` on Clariden and change the workdir to match your own filesystem).
 
 To verify the setup, run the infrastructure test (`test-infra.sbatch`) which benchmarks NCCL all-reduce throughput across message sizes from 128 MB to 16 GB. Expected results on 4x GH200 nodes: ~340 GB/s bus bandwidth intra-node (NVLink) and ~93 GB/s inter-node (Slingshot-11), both well within the theoretical hardware ceiling (450 GB/s NVLink-C2C per direction, 100 GB/s Slingshot per node).
 

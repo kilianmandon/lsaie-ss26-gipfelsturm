@@ -1,0 +1,3 @@
+# Kilian Options
+precision: bf16
+activation_offloading: false
