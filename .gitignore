@@ -1,3 +1,4 @@
 logs/
 data/climbmix_small/
 config.sh
+slurm-*.out

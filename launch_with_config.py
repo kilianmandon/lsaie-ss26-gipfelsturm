@@ -19,14 +19,29 @@ def launch(mode, model_size, config, training_steps=None, nodes=4, dry_run=False
         eval_interval=1000
         eval_iters=10
         lr_warmup_iters=200
-        logging_extra='''   --tensorboard-dir $TENSORBOARD_DIR 
-    --log-timers-to-tensorboard 
+        logging_extra='''   --tensorboard-dir $TENSORBOARD_DIR
+    --log-timers-to-tensorboard
+    --log-memory-to-tensorboard
+'''
+        wandb = True
+    elif mode=='attention-bench':
+        if training_steps is None:
+            training_steps = int(config.get('training_steps', 80))
+        time = str(config.get('walltime', '00:30:00'))
+        eval_interval=training_steps
+        eval_iters=0
+        lr_warmup_iters=10
+        logging_extra='''   --tensorboard-dir $TENSORBOARD_DIR
+    --log-timers-to-tensorboard
     --log-memory-to-tensorboard
 '''
         wandb = True
 
     else:
-        raise ValueError('Mode must be either "throughput" or "train".')
+        raise ValueError('Mode must be either "throughput", "train", or "attention-bench".')
+
+    if lr_warmup_iters >= training_steps:
+        lr_warmup_iters = max(training_steps - 1, 0)
 
     if model_size=='125m':
         num_layers=12; hidden=768;ffn=2048;heads=12;kv_heads=4;mbs=16
@@ -43,10 +58,35 @@ def launch(mode, model_size, config, training_steps=None, nodes=4, dry_run=False
     else:
         raise ValueError(f'Unknown model size: {model_size}. Must be either 125m, 350m, 760m, 1.5b, 3b, 8b.')
 
-    gbs=256
-    seq_len=4096
+    mbs = int(config.get('micro_batch_size') or mbs)
+    gbs = int(config.get('global_batch_size', 256))
+    seq_len = int(config.get('seq_len', 4096))
+    tp = int(config.get('tensor_parallel_size', 1))
+    pp = int(config.get('pipeline_parallel_size', 1))
 
-    job_name=f'gipfel-{mode}-{model_size}-{training_steps}s-{nodes}n'
+    attention_backend_config = config.get('attention_backend')
+    attention_preset = config.get('attention_preset')
+    if attention_backend_config and attention_preset in (None, 'auto'):
+        attention_preset = attention_backend_config
+    if attention_preset is None:
+        attention_preset = 'auto'
+    attention_preset = {'fused': 'cudnn'}.get(attention_preset, attention_preset)
+    attention_mask = config.get('attention_mask', 'causal')
+    window_size = int(config.get('window_size', 1024))
+    attention_backend, backend_env_block = attention_settings(attention_preset, attention_backend_config)
+
+    if attention_mask == 'causal':
+        window_desc = 'full'
+    elif attention_mask == 'sliding':
+        window_desc = str(window_size)
+    else:
+        raise ValueError(f'Unknown attention_mask: {attention_mask}. Must be causal or sliding.')
+
+    world_size = nodes * 4
+    if world_size % (tp * pp) != 0:
+        raise ValueError(f'World size {world_size} is not divisible by TP*PP={tp * pp}.')
+
+    job_name=f'gipfel-{mode}-{model_size}-{attention_preset}-{attention_mask}{window_desc}-{seq_len}seq-{mbs}mbs-{gbs}gbs-{nodes}n'
 
     if wandb:
         wandb_block = '''
@@ -71,13 +111,17 @@ fi'''
 
     whole_script = '#!/bin/bash'
 
-    whole_script += sbatch_directives(job_name, nodes, time)
+    whole_script += sbatch_directives(job_name, nodes, time, config)
     whole_script += script_body()
-    whole_script += script_configs(mbs, gbs, seq_len, training_steps, mode, model_size)
+    whole_script += script_configs(
+        mbs, gbs, seq_len, training_steps, mode, model_size, tp, pp,
+        attention_preset, attention_backend, attention_mask, window_size, window_desc,
+    )
     whole_script += script_setup(config)
+    whole_script += script_attention(backend_env_block, attention_backend, attention_mask, window_size)
     whole_script += script_model(num_layers, hidden, ffn, heads, kv_heads)
     whole_script += script_training(eval_interval, eval_iters, lr_warmup_iters)
-    whole_script += script_rest()
+    whole_script += script_rest(tp, pp)
 
     whole_script += f'{logging_extra})'
     whole_script += script_tokenizer()
@@ -89,17 +133,72 @@ fi'''
         f.write(whole_script)
 
     if not dry_run:
-        subprocess.run(['sbatch', str(script_location)])
+        subprocess.run(
+            [
+                'sbatch',
+                '--parsable',
+                '-A', str(config.get('account', 'lsaie-ss26')),
+                '-p', str(config.get('partition', 'normal')),
+                str(script_location),
+            ],
+            check=True,
+        )
 
 
 
     
 
 
-def sbatch_directives(job_name, nodes, time):
+def attention_settings(attention_preset, attention_backend=None):
+    aliases = {
+        'fused': 'cudnn',
+    }
+    preset = aliases.get(attention_preset, attention_preset)
+    backend = aliases.get(attention_backend, attention_backend) if attention_backend else None
+    if backend is not None and backend != preset:
+        raise ValueError(
+            f'attention_backend={attention_backend} conflicts with attention_preset={attention_preset}.'
+        )
+
+    if preset == 'auto':
+        return 'auto', '''
+unset NVTE_FLASH_ATTN
+unset NVTE_FUSED_ATTN
+unset NVTE_UNFUSED_ATTN
+unset NVTE_FUSED_ATTN_BACKEND
+unset NVTE_FUSED_ATTN_USE_FAv2_BWD
+'''
+    if preset == 'flash':
+        return 'flash', '''
+export NVTE_FLASH_ATTN=1
+export NVTE_FUSED_ATTN=0
+export NVTE_UNFUSED_ATTN=0
+unset NVTE_FUSED_ATTN_BACKEND
+unset NVTE_FUSED_ATTN_USE_FAv2_BWD
+'''
+    if preset == 'cudnn':
+        return 'fused', '''
+export NVTE_FLASH_ATTN=0
+export NVTE_FUSED_ATTN=1
+export NVTE_UNFUSED_ATTN=0
+export NVTE_FUSED_ATTN_BACKEND=1
+export NVTE_FUSED_ATTN_USE_FAv2_BWD=0
+'''
+    if preset == 'unfused':
+        return 'unfused', '''
+export NVTE_FLASH_ATTN=0
+export NVTE_FUSED_ATTN=0
+export NVTE_UNFUSED_ATTN=1
+unset NVTE_FUSED_ATTN_BACKEND
+unset NVTE_FUSED_ATTN_USE_FAv2_BWD
+'''
+    raise ValueError(f'Unknown attention_preset: {attention_preset}. Must be auto, flash, cudnn, or unfused.')
+
+
+def sbatch_directives(job_name, nodes, time, config):
     return f'''
-#SBATCH --account=lsaie-ss26
-#SBATCH --partition=normal
+#SBATCH --account={config.get('account', 'lsaie-ss26')}
+#SBATCH --partition={config.get('partition', 'normal')}
 #SBATCH --time={time}
 #SBATCH --job-name={job_name}
 #SBATCH --output=logs/%x-%j.log
@@ -115,6 +214,8 @@ def sbatch_directives(job_name, nodes, time):
 def script_body():
     cwd = str(Path('.').resolve())
     return f'''
+set -euo pipefail
+
 echo "START TIME: $(date)"
 
 ################ Configs ################
@@ -125,17 +226,30 @@ DATASET_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/cache
 '''
 
 
-def script_configs(mbs, gbs, seq_len, training_steps, mode, model_size):
+def script_configs(
+    mbs, gbs, seq_len, training_steps, mode, model_size, tp, pp,
+    attention_preset, attention_backend, attention_mask, window_size, window_desc,
+):
     return f'''
 # Training config
 MBS={mbs}
 GBS={gbs}
 SEQ_LEN={seq_len}
 TRAINING_STEPS={training_steps}
+TP={tp}
+PP={pp}
+ATTN_PRESET={attention_preset}
+ATTN_BACKEND={attention_backend}
+ATTN_MASK={attention_mask}
+WINDOW_SIZE={window_size}
+
+SLURM_GPUS_PER_NODE=${{SLURM_GPUS_PER_NODE:-4}}
+SLURM_CPUS_PER_TASK=${{SLURM_CPUS_PER_TASK:-288}}
+SLURM_NNODES=${{SLURM_NNODES:-${{SLURM_JOB_NUM_NODES:-1}}}}
 
 # Logging
 PROJECT_NAME=gipfelsturm
-EXP_NAME={mode}-{model_size}-${{SLURM_NNODES}}n
+EXP_NAME={mode}-{model_size}-{attention_preset}-{attention_mask}{window_desc}-seq{seq_len}-mbs{mbs}-gbs{gbs}-${{SLURM_NNODES}}n
 LOG_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/$PROJECT_NAME/$EXP_NAME
 TENSORBOARD_DIR=$LOG_DIR/tensorboard
 '''
@@ -174,8 +288,18 @@ def script_setup(config):
 mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR
 
 cd $MEGATRON_LM_DIR
-flock $MEGATRON_LM_DIR/.git-lock bash -c "cd $MEGATRON_LM_DIR && git checkout -- . && git apply $WORKDIR/patches/*.patch"
-export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
+flock $WORKDIR/logs/megatron-patch.lock bash -c "
+cd $MEGATRON_LM_DIR
+if git apply --check $WORKDIR/patches/*.patch 2>/dev/null; then
+    git apply $WORKDIR/patches/*.patch
+elif git apply --reverse --check $WORKDIR/patches/*.patch 2>/dev/null; then
+    echo 'Megatron patches already applied.'
+else
+    echo 'Megatron patch state is neither clean nor already applied.'
+    git status --short
+    exit 1
+fi"
+export PYTHONPATH=$MEGATRON_LM_DIR:${{PYTHONPATH:-}}
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -185,8 +309,27 @@ export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK/SLURM_GPUS_PER_NODE))
 MASTER_ADDR=$(hostname)
 MASTER_PORT=25678
 
+echo "Megatron commit: $(git -C $MEGATRON_LM_DIR rev-parse --short HEAD)"
+echo "Attention preset/backend: $ATTN_PRESET/$ATTN_BACKEND mask=$ATTN_MASK window=$WINDOW_SIZE seq=$SEQ_LEN mbs=$MBS gbs=$GBS tp=$TP pp=$PP"
+
 TRANSFORMER_ENGINE_ARGS=(
 {transformer_engine_args_string}
+)
+'''
+
+def script_attention(backend_env_block, attention_backend, attention_mask, window_size):
+    window_arg = ''
+    if attention_mask == 'sliding':
+        window_arg = f'''
+    --window-size {window_size},0'''
+
+    return f'''
+{backend_env_block}
+
+echo "NVTE env: NVTE_FLASH_ATTN=${{NVTE_FLASH_ATTN:-unset}} NVTE_FUSED_ATTN=${{NVTE_FUSED_ATTN:-unset}} NVTE_UNFUSED_ATTN=${{NVTE_UNFUSED_ATTN:-unset}} NVTE_FUSED_ATTN_BACKEND=${{NVTE_FUSED_ATTN_BACKEND:-unset}} NVTE_FUSED_ATTN_USE_FAv2_BWD=${{NVTE_FUSED_ATTN_USE_FAv2_BWD:-unset}}"
+
+ATTENTION_ARGS=(
+    --attention-backend {attention_backend}{window_arg}
 )
 '''
 
@@ -243,8 +386,8 @@ LEARNING_RATE_ARGS=(
 '''
 
 
-def script_rest():
-    return '''
+def script_rest(tp, pp):
+    return f'''
 INITIALIZATION_ARGS=(
     --seed 42
     --init-method-std 0.02
@@ -255,8 +398,8 @@ MIXED_PRECISION_ARGS=(
 )
 
 DISTRIBUTED_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 1
+    --tensor-model-parallel-size {tp}
+    --pipeline-model-parallel-size {pp}
     --use-distributed-optimizer
     --overlap-grad-reduce
     --overlap-param-gather
@@ -303,6 +446,7 @@ TRAINING_CMD="torchrun ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \\
     ${INITIALIZATION_ARGS[@]} \\
     ${MIXED_PRECISION_ARGS[@]} \\
     ${DISTRIBUTED_ARGS[@]} \\
+    ${ATTENTION_ARGS[@]} \\
     ${LOGGING_ARGS[@]} \\
     ${TOKENIZER_ARGS[@]} \\
     ${DATA_ARGS[@]}"
@@ -329,14 +473,14 @@ if __name__=='__main__':
     
     parser = argparse.ArgumentParser(
                     prog='Launcher',
-                    description='Starts either a throughput or training test run.')
+                    description='Starts a throughput, train, or attention benchmark run.')
 
-    parser.add_argument('mode', help='Must be throughput or training')
+    parser.add_argument('mode', help='Must be throughput, train, or attention-bench')
     parser.add_argument('model_size', help='Must be one of  125m, 350m, 760m, 1.5b, 3b, 8b.')
     parser.add_argument('-n', '--nodes', default=4, required=False)
     parser.add_argument('-t', '--training_steps', default=None, required=False)
     parser.add_argument('-c', '--config', default=None)
-    parser.add_argument('--dry_run', action=argparse.BooleanOptionalAction, help='If set, the sbatch script is only generated but not launched.')
+    parser.add_argument('--dry_run', action='store_true', help='If set, the sbatch script is only generated but not launched.')
 
     args = parser.parse_args()
 
@@ -346,7 +490,8 @@ if __name__=='__main__':
     if args.config is not None:
         with open(args.config, 'r') as f:
             config_addon = yaml.safe_load(f)
-        config |= config_addon
+        if config_addon:
+            config.update(config_addon)
 
 
 

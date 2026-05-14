@@ -2,8 +2,9 @@
 #
 # Usage: ./launch.sh <mode> <model_size> [steps] [nodes]
 #
-# Modes:     throughput  (50 steps, with W&B)
-#            train       (N steps, with W&B and Tensorboard)
+# Modes:     throughput       (50 steps, with W&B)
+#            train            (N steps, with W&B and Tensorboard)
+#            attention-bench  (fixed-config attention backend benchmark)
 #
 # Sizes:     125m, 350m, 760m, 1.5b, 3b, 8b
 #
@@ -14,10 +15,20 @@
 #            ./launch.sh throughput 8b 50 1
 #            ./launch.sh train 760m 5000
 #            ./launch.sh train 1.5b 3000 8
+#            SUBMIT=0 ATTN_PRESET=flash ./launch.sh attention-bench 760m 80 1
 
 set -euo pipefail
 
-source "$(dirname "$0")/config.sh"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ -f "$SCRIPT_DIR/config.sh" ]; then
+    # config.sh is intentionally git-ignored and may contain private values.
+    source "$SCRIPT_DIR/config.sh"
+fi
+
+WORKDIR=${GIPFEL_WORKDIR:-${WORKDIR:-$PWD}}
+SBATCH_ACCOUNT=${SBATCH_ACCOUNT:-lsaie-ss26}
+SLURM_PARTITION=${GIPFEL_PARTITION:-normal}
+SUBMIT=${SUBMIT:-1}
 
 MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
@@ -47,37 +58,58 @@ case $MODE in
     --log-memory-to-tensorboard"
         WANDB=true
         ;;
+    attention-bench)
+        TRAINING_STEPS=${STEPS:-${3:-80}}
+        NODES=${NODES:-${4:-1}}
+        TIME=${WALLTIME:-00:30:00}
+        EVAL_INTERVAL=$TRAINING_STEPS
+        EVAL_ITERS=0
+        LR_WARMUP_ITERS=10
+        LOGGING_EXTRA="
+    --tensorboard-dir \$TENSORBOARD_DIR
+    --log-timers-to-tensorboard
+    --log-memory-to-tensorboard"
+        WANDB=true
+        ;;
     *)
-        echo "Unknown mode: $MODE. Choose: throughput, train"
+        echo "Unknown mode: $MODE. Choose: throughput, train, attention-bench"
         exit 1
         ;;
 esac
+
+if [ "$LR_WARMUP_ITERS" -ge "$TRAINING_STEPS" ]; then
+    if [ "$TRAINING_STEPS" -gt 1 ]; then
+        LR_WARMUP_ITERS=$((TRAINING_STEPS - 1))
+    else
+        LR_WARMUP_ITERS=0
+    fi
+fi
 
 ################ Model config ################
 case $MODEL_SIZE in
     125m)
         NUM_LAYERS=12;  HIDDEN=768;  FFN=2048;  HEADS=12; KV_HEADS=4
-        MBS=16
+        DEFAULT_MBS=16
         ;;
     350m)
         NUM_LAYERS=24; HIDDEN=1024; FFN=2816;  HEADS=16; KV_HEADS=4
-        MBS=8
+        DEFAULT_MBS=8
         ;;
     760m)
         NUM_LAYERS=24; HIDDEN=1536; FFN=4096;  HEADS=16; KV_HEADS=4
-        MBS=4
+        DEFAULT_MBS=4
         ;;
     1.5b)
         NUM_LAYERS=48; HIDDEN=1600; FFN=4352;  HEADS=20; KV_HEADS=4
-        MBS=4
+        DEFAULT_MBS=4
         ;;
     3b)
         NUM_LAYERS=32; HIDDEN=3072; FFN=8192;  HEADS=24; KV_HEADS=8
-        MBS=4
+        DEFAULT_MBS=4
         ;;
     8b)
         NUM_LAYERS=32; HIDDEN=4096; FFN=14336; HEADS=32; KV_HEADS=8
-        MBS=2
+        DEFAULT_MBS=2
         ;;
     *)
         echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b"
@@ -85,20 +117,109 @@ case $MODEL_SIZE in
         ;;
 esac
 
-GBS=256
-SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
+MBS=${MBS:-$DEFAULT_MBS}
+GBS=${GBS:-256}
+SEQ_LEN=${SEQ_LEN:-4096}
+TP=${TP:-1}
+PP=${PP:-1}
+ATTN_MASK=${ATTN_MASK:-causal}
+WINDOW_SIZE=${WINDOW_SIZE:-1024}
+if [ -z "${ATTN_PRESET+x}" ]; then
+    case ${ATTN_BACKEND:-auto} in
+        fused) ATTN_PRESET=cudnn ;;
+        auto|flash|unfused) ATTN_PRESET=${ATTN_BACKEND:-auto} ;;
+        *)
+            echo "Unknown ATTN_BACKEND: ${ATTN_BACKEND}. Choose: auto, flash, fused, unfused"
+            exit 1
+            ;;
+    esac
+fi
+
+case $ATTN_PRESET in
+    auto)
+        RESOLVED_ATTN_BACKEND=auto
+        BACKEND_ENV_BLOCK='
+unset NVTE_FLASH_ATTN
+unset NVTE_FUSED_ATTN
+unset NVTE_UNFUSED_ATTN
+unset NVTE_FUSED_ATTN_BACKEND
+unset NVTE_FUSED_ATTN_USE_FAv2_BWD'
+        ;;
+    flash)
+        RESOLVED_ATTN_BACKEND=flash
+        BACKEND_ENV_BLOCK='
+export NVTE_FLASH_ATTN=1
+export NVTE_FUSED_ATTN=0
+export NVTE_UNFUSED_ATTN=0
+unset NVTE_FUSED_ATTN_BACKEND
+unset NVTE_FUSED_ATTN_USE_FAv2_BWD'
+        ;;
+    cudnn)
+        RESOLVED_ATTN_BACKEND=fused
+        BACKEND_ENV_BLOCK='
+export NVTE_FLASH_ATTN=0
+export NVTE_FUSED_ATTN=1
+export NVTE_UNFUSED_ATTN=0
+export NVTE_FUSED_ATTN_BACKEND=1
+export NVTE_FUSED_ATTN_USE_FAv2_BWD=0'
+        ;;
+    unfused)
+        RESOLVED_ATTN_BACKEND=unfused
+        BACKEND_ENV_BLOCK='
+export NVTE_FLASH_ATTN=0
+export NVTE_FUSED_ATTN=0
+export NVTE_UNFUSED_ATTN=1
+unset NVTE_FUSED_ATTN_BACKEND
+unset NVTE_FUSED_ATTN_USE_FAv2_BWD'
+        ;;
+    *)
+        echo "Unknown ATTN_PRESET: $ATTN_PRESET. Choose: auto, flash, cudnn, unfused"
+        exit 1
+        ;;
+esac
+
+if [ -n "${ATTN_BACKEND:-}" ] && [ "$ATTN_BACKEND" != "$RESOLVED_ATTN_BACKEND" ]; then
+    echo "ATTN_BACKEND=$ATTN_BACKEND conflicts with ATTN_PRESET=$ATTN_PRESET, which resolves to $RESOLVED_ATTN_BACKEND"
+    exit 1
+fi
+
+case $ATTN_MASK in
+    causal) WINDOW_DESC=full ;;
+    sliding) WINDOW_DESC=${WINDOW_SIZE} ;;
+    *)
+        echo "Unknown ATTN_MASK: $ATTN_MASK. Choose: causal, sliding"
+        exit 1
+        ;;
+esac
+
+WORLD_SIZE=$((NODES * 4))
+MODEL_PARALLEL_SIZE=$((TP * PP))
+if [ $((WORLD_SIZE % MODEL_PARALLEL_SIZE)) -ne 0 ]; then
+    echo "World size $WORLD_SIZE is not divisible by TP*PP=$MODEL_PARALLEL_SIZE"
+    exit 1
+fi
+
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${ATTN_PRESET}-${ATTN_MASK}${WINDOW_DESC}-${SEQ_LEN}seq-${MBS}mbs-${GBS}gbs-${NODES}n"
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
     WANDB_BLOCK='
 # WANDB
-if [ -n "$WANDB_API_KEY" ]; then
+if [ -z "${WANDB_API_KEY:-}" ] && [ -f "$WORKDIR/local_files/credentials.md" ]; then
+    WANDB_API_KEY=$(awk '"'"'BEGIN{IGNORECASE=1} /^wandb api key:/ {sub(/^[^:]*:[[:space:]]*/, ""); print; exit}'"'"' "$WORKDIR/local_files/credentials.md")
+    export WANDB_API_KEY
+fi
+if [ -n "${WANDB_API_KEY:-}" ]; then
     echo "[$(date)] WANDB enabled."
-    TRAINING_CMD="$TRAINING_CMD \
-        --wandb-save-dir $LOG_DIR \
-        --wandb-project $PROJECT_NAME \
-        --wandb-exp-name $EXP_NAME-$SLURM_JOB_ID"
+    export WANDB_ENTITY
+    export WANDB_PROJECT="$PROJECT_NAME"
+    export WANDB_DIR="$LOG_DIR"
+    TRAINING_CMD+=(
+        --wandb-save-dir "$LOG_DIR"
+        --wandb-entity "$WANDB_ENTITY"
+        --wandb-project "$PROJECT_NAME"
+        --wandb-exp-name "$EXP_NAME-$SLURM_JOB_ID"
+    )
 else
     export WANDB_MODE=disabled
     echo "[$(date)] WANDB disabled."
@@ -117,8 +238,8 @@ cat > "$SCRIPT" << 'HEADER'
 HEADER
 
 cat >> "$SCRIPT" << SBATCH_DIRECTIVES
-#SBATCH --account=lsaie-ss26
-#SBATCH --partition=normal
+#SBATCH --account=${SBATCH_ACCOUNT}
+#SBATCH --partition=${SLURM_PARTITION}
 #SBATCH --time=${TIME}
 #SBATCH --job-name=${JOB_NAME}
 #SBATCH --output=logs/%x-%j.log
@@ -131,17 +252,20 @@ cat >> "$SCRIPT" << SBATCH_DIRECTIVES
 #SBATCH --no-requeue
 SBATCH_DIRECTIVES
 
-cat >> "$SCRIPT" << BODY
+cat >> "$SCRIPT" << 'BODY_HEAD'
+set -euo pipefail
 
-echo "START TIME: \$(date)"
-echo "START TIME: \$(date)"
+echo "START TIME: $(date)"
 
 ################ Configs ################
-WORKDIR="$(pwd)"
+BODY_HEAD
+
+cat >> "$SCRIPT" << BODY_WORKDIR
+WORKDIR=${WORKDIR}
 MEGATRON_LM_DIR=\$WORKDIR/Megatron-LM
 DATA_PREFIX=/capstor/store/cscs/swissai/infra01/datasets/nvidia/Nemotron-ClimbMix/climbmix_small_megatron/climbmix_small
 DATASET_CACHE_DIR=/iopsstor/scratch/cscs/\$USER/gipfelsturm/cache
-BODY
+BODY_WORKDIR
 
 cat >> "$SCRIPT" << CONFIGS
 
@@ -150,10 +274,26 @@ MBS=${MBS}
 GBS=${GBS}
 SEQ_LEN=${SEQ_LEN}
 TRAINING_STEPS=${TRAINING_STEPS}
+TP=${TP}
+PP=${PP}
+ATTN_PRESET=${ATTN_PRESET}
+ATTN_BACKEND=${RESOLVED_ATTN_BACKEND}
+ATTN_MASK=${ATTN_MASK}
+WINDOW_SIZE=${WINDOW_SIZE}
+
+# Slurm does not guarantee that every #SBATCH resource value is exported as an
+# environment variable on every site, so normalize the values used below.
+SLURM_GPUS_PER_NODE=\${SLURM_GPUS_PER_NODE:-4}
+SLURM_CPUS_PER_TASK=\${SLURM_CPUS_PER_TASK:-288}
+SLURM_NNODES=\${SLURM_NNODES:-\${SLURM_JOB_NUM_NODES:-${NODES}}}
 
 # Logging
-PROJECT_NAME=gipfelsturm
-EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n
+WANDB_ENTITY=\${GIPFEL_WANDB_ENTITY:-cler}
+PROJECT_NAME=\${GIPFEL_WANDB_PROJECT:-}
+if [ -z "\$PROJECT_NAME" ]; then
+    PROJECT_NAME="fla's"
+fi
+EXP_NAME=${MODE}-${MODEL_SIZE}-${ATTN_PRESET}-${ATTN_MASK}${WINDOW_DESC}-seq${SEQ_LEN}-mbs${MBS}-gbs${GBS}-\${SLURM_NNODES}n
 LOG_DIR=/iopsstor/scratch/cscs/\$USER/gipfelsturm/\$PROJECT_NAME/\$EXP_NAME
 TENSORBOARD_DIR=\$LOG_DIR/tensorboard
 CONFIGS
@@ -165,8 +305,18 @@ cat >> "$SCRIPT" << 'SETUP'
 mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR
 
 cd $MEGATRON_LM_DIR
-flock $MEGATRON_LM_DIR/.git-lock bash -c "cd $MEGATRON_LM_DIR && git checkout -- . && git apply $WORKDIR/patches/*.patch"
-export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
+flock $WORKDIR/logs/megatron-patch.lock bash -c "
+cd $MEGATRON_LM_DIR
+if git apply --check $WORKDIR/patches/*.patch 2>/dev/null; then
+    git apply $WORKDIR/patches/*.patch
+elif git apply --reverse --check $WORKDIR/patches/*.patch 2>/dev/null; then
+    echo 'Megatron patches already applied.'
+else
+    echo 'Megatron patch state is neither clean nor already applied.'
+    git status --short
+    exit 1
+fi"
+export PYTHONPATH=$MEGATRON_LM_DIR:${PYTHONPATH:-}
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -176,6 +326,9 @@ export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK/SLURM_GPUS_PER_NODE))
 MASTER_ADDR=$(hostname)
 MASTER_PORT=25678
 
+echo "Megatron commit: $(git -C $MEGATRON_LM_DIR rev-parse --short HEAD)"
+echo "Attention preset/backend: $ATTN_PRESET/$ATTN_BACKEND mask=$ATTN_MASK window=$WINDOW_SIZE seq=$SEQ_LEN mbs=$MBS gbs=$GBS tp=$TP pp=$PP"
+
 TRANSFORMER_ENGINE_ARGS=(
     --transformer-impl transformer_engine
     --use-precision-aware-optimizer
@@ -183,6 +336,24 @@ TRANSFORMER_ENGINE_ARGS=(
 )
 
 SETUP
+
+cat >> "$SCRIPT" << BACKEND_ENV
+${BACKEND_ENV_BLOCK}
+
+echo "NVTE env: NVTE_FLASH_ATTN=\${NVTE_FLASH_ATTN:-unset} NVTE_FUSED_ATTN=\${NVTE_FUSED_ATTN:-unset} NVTE_UNFUSED_ATTN=\${NVTE_UNFUSED_ATTN:-unset} NVTE_FUSED_ATTN_BACKEND=\${NVTE_FUSED_ATTN_BACKEND:-unset} NVTE_FUSED_ATTN_USE_FAv2_BWD=\${NVTE_FUSED_ATTN_USE_FAv2_BWD:-unset}"
+
+ATTENTION_ARGS=(
+    --attention-backend ${RESOLVED_ATTN_BACKEND}
+)
+BACKEND_ENV
+
+if [ "$ATTN_MASK" = "sliding" ]; then
+cat >> "$SCRIPT" << SLIDING
+ATTENTION_ARGS+=(
+    --window-size ${WINDOW_SIZE},0
+)
+SLIDING
+fi
 
 cat >> "$SCRIPT" << MODEL
 NETWORK_SIZE_ARGS=(
@@ -247,8 +418,8 @@ MIXED_PRECISION_ARGS=(
 )
 
 DISTRIBUTED_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 1
+    --tensor-model-parallel-size $TP
+    --pipeline-model-parallel-size $PP
     --use-distributed-optimizer
     --overlap-grad-reduce
     --overlap-param-gather
@@ -288,18 +459,23 @@ TORCHRUN_ARGS=(
     --tee 3
 )
 
-TRAINING_CMD="torchrun ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \
-    ${TRANSFORMER_ENGINE_ARGS[@]} \
-    ${NETWORK_SIZE_ARGS[@]} \
-    ${TRAINING_ARGS[@]} \
-    ${REGULARIZATION_ARGS[@]} \
-    ${LEARNING_RATE_ARGS[@]} \
-    ${INITIALIZATION_ARGS[@]} \
-    ${MIXED_PRECISION_ARGS[@]} \
-    ${DISTRIBUTED_ARGS[@]} \
-    ${LOGGING_ARGS[@]} \
-    ${TOKENIZER_ARGS[@]} \
-    ${DATA_ARGS[@]}"
+TRAINING_CMD=(
+    torchrun
+    "${TORCHRUN_ARGS[@]}"
+    "$MEGATRON_LM_DIR/pretrain_gpt.py"
+    "${TRANSFORMER_ENGINE_ARGS[@]}"
+    "${NETWORK_SIZE_ARGS[@]}"
+    "${TRAINING_ARGS[@]}"
+    "${REGULARIZATION_ARGS[@]}"
+    "${LEARNING_RATE_ARGS[@]}"
+    "${INITIALIZATION_ARGS[@]}"
+    "${MIXED_PRECISION_ARGS[@]}"
+    "${DISTRIBUTED_ARGS[@]}"
+    "${ATTENTION_ARGS[@]}"
+    "${LOGGING_ARGS[@]}"
+    "${TOKENIZER_ARGS[@]}"
+    "${DATA_ARGS[@]}"
+)
 
 TOKENIZER
 
@@ -314,8 +490,14 @@ WANDB_INSERT
 
 cat >> "$SCRIPT" << 'FOOTER'
 
-echo "CMD: $TRAINING_CMD"
-srun -lu --mpi=pmix --network=disable_rdzv_get --environment=alps3 --cpus-per-task $SLURM_CPUS_PER_TASK --wait 60 bash -c "numactl --membind=0-3 $TRAINING_CMD"
+printf 'CMD:'
+printf ' %q' "${TRAINING_CMD[@]}"
+printf '\n'
+if [ "${GIPFEL_DIRECT_RUN:-0}" = "1" ]; then
+    numactl --membind=0-3 "${TRAINING_CMD[@]}"
+else
+    srun -lu --mpi=pmix --network=disable_rdzv_get --environment=alps3 --cpus-per-task "$SLURM_CPUS_PER_TASK" --wait 60 bash -c 'numactl --membind=0-3 "$@"' bash "${TRAINING_CMD[@]}"
+fi
 
 echo "END TIME: $(date)"
 FOOTER
@@ -323,4 +505,9 @@ FOOTER
 chmod +x "$SCRIPT"
 
 echo "Generated: $SCRIPT"
-# sbatch "$SCRIPT"
+if [ "$SUBMIT" = "1" ]; then
+    unset SBATCH_PARTITION
+    sbatch --parsable -A "$SBATCH_ACCOUNT" -p "$SLURM_PARTITION" "$SCRIPT"
+else
+    echo "SUBMIT=$SUBMIT, not submitting."
+fi

@@ -1,3 +1,19 @@
 # Kilian Options
 precision: bf16
 activation_offloading: false
+
+# Shared run options
+account: lsaie-ss26
+partition: normal
+seq_len: 4096
+global_batch_size: 256
+micro_batch_size:
+tensor_parallel_size: 1
+pipeline_parallel_size: 1
+
+# Lingfeng attention benchmark options
+attention_preset: auto
+attention_mask: causal
+window_size: 1024
+walltime: "00:30:00"
+training_steps: 80
