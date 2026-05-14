@@ -1,0 +1,135 @@
+diff --git a/megatron/core/extensions/transformer_engine_spec_provider.py b/megatron/core/extensions/transformer_engine_spec_provider.py
+index a071959bf..df38a9605 100644
+--- a/megatron/core/extensions/transformer_engine_spec_provider.py
++++ b/megatron/core/extensions/transformer_engine_spec_provider.py
+@@ -1,6 +1,7 @@
+ # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ 
+ import warnings
++import os
+ from typing import Optional, Tuple
+ 
+ from megatron.core.extensions.transformer_engine import (
+@@ -56,6 +57,10 @@ class TESpecProvider(BackendSpecProvider):
+ 
+     def core_attention(self) -> type:
+         """Which module to use for attention"""
++        if os.getenv("MEGATRON_FA3_CORE_ATTN") == "1":
++            from megatron.core.transformer.fa3_dot_product_attention import FA3DotProductAttention
++
++            return FA3DotProductAttention
+         return TEDotProductAttention
+ 
+     def grouped_mlp_modules(
+diff --git a/megatron/core/transformer/fa3_dot_product_attention.py b/megatron/core/transformer/fa3_dot_product_attention.py
+new file mode 100644
+--- /dev/null
++++ b/megatron/core/transformer/fa3_dot_product_attention.py
+@@ -0,0 +1,107 @@
++# Copyright (c) 2026, ETH Zurich LSAIE course project contributors.
++
++from typing import Optional
++
++import torch
++from torch import Tensor
++
++from megatron.core.packed_seq_params import PackedSeqParams
++from megatron.core.process_groups_config import ProcessGroupCollection
++from megatron.core.transformer.enums import AttnMaskType
++from megatron.core.transformer.module import MegatronModule
++from megatron.core.transformer.transformer_config import TransformerConfig
++from megatron.core.transformer.utils import is_layer_window_attention
++
++try:
++    from flash_attn_interface import flash_attn_func
++except ImportError:
++    flash_attn_func = None
++
++
++class FA3DotProductAttention(MegatronModule):
++    """FlashAttention-3 core attention for fixed-shape GPT training probes.
++
++    This intentionally covers the narrow benchmark path used by Gipfelsturm:
++    BF16, no dropout, no packed sequences, TP=1, causal/sliding GPT attention.
++    TransformerEngine still provides the surrounding linear/norm modules.
++    """
++
++    def __init__(
++        self,
++        config: TransformerConfig,
++        layer_number: int,
++        attn_mask_type: AttnMaskType,
++        attention_type: str,
++        attention_dropout: Optional[float] = None,
++        softmax_scale: Optional[float] = None,
++        cp_comm_type: Optional[str] = None,
++        pg_collection: Optional[ProcessGroupCollection] = None,
++    ):
++        super().__init__(config=config)
++        if flash_attn_func is None:
++            raise ImportError(
++                "MEGATRON_FA3_CORE_ATTN=1 requires the Hopper FlashAttention-3 "
++                "package on PYTHONPATH; expected top-level flash_attn_interface."
++            )
++        if config.context_parallel_size != 1:
++            raise AssertionError("FA3DotProductAttention benchmark path does not support CP.")
++        dropout = config.attention_dropout if attention_dropout is None else attention_dropout
++        if dropout != 0.0:
++            raise AssertionError("FA3DotProductAttention benchmark path requires attention dropout 0.")
++
++        self.layer_number = max(1, layer_number)
++        self.attn_mask_type = attn_mask_type
++        self.attention_type = attention_type
++        self.softmax_scale = softmax_scale
++        self.current_max_attn_logits = None
++
++    def _window_size(self):
++        if is_layer_window_attention(
++            self.config.window_size, self.config.window_attn_skip_freq, self.layer_number
++        ):
++            window_size = self.config.window_size
++            if isinstance(window_size, int):
++                return (window_size, 0)
++            return tuple(window_size)
++        return (-1, -1)
++
++    def forward(
++        self,
++        query: Tensor,
++        key: Tensor,
++        value: Tensor,
++        attention_mask: Optional[Tensor],
++        attn_mask_type: Optional[AttnMaskType] = None,
++        attention_bias: Optional[Tensor] = None,
++        packed_seq_params: Optional[PackedSeqParams] = None,
++    ) -> torch.Tensor:
++        if packed_seq_params is not None:
++            raise AssertionError("FA3DotProductAttention does not support packed sequences.")
++        if attention_bias is not None:
++            raise AssertionError("FA3DotProductAttention does not support attention bias.")
++
++        mask_type = attn_mask_type or self.attn_mask_type
++        causal_masks = {
++            AttnMaskType.causal,
++            AttnMaskType.padding_causal,
++            AttnMaskType.causal_bottom_right,
++        }
++        if mask_type not in causal_masks:
++            raise AssertionError(f"FA3DotProductAttention only supports causal masks, got {mask_type}.")
++
++        q = query.transpose(0, 1).contiguous()
++        k = key.transpose(0, 1).contiguous()
++        v = value.transpose(0, 1).contiguous()
++        pack_gqa = q.size(2) != k.size(2)
++
++        out = flash_attn_func(
++            q,
++            k,
++            v,
++            softmax_scale=self.softmax_scale,
++            causal=True,
++            window_size=self._window_size(),
++            num_splits=1,
++            pack_gqa=pack_gqa,
++        )
++        return out.transpose(0, 1).contiguous().view(query.size(0), query.size(1), -1)

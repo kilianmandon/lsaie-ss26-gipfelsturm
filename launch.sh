@@ -16,6 +16,7 @@
 #            ./launch.sh train 760m 5000
 #            ./launch.sh train 1.5b 3000 8
 #            SUBMIT=0 ATTN_PRESET=flash ./launch.sh attention-bench 760m 80 1
+#            SUBMIT=0 ATTN_PRESET=fa3 ./launch.sh attention-bench 760m 5 1
 
 set -euo pipefail
 
@@ -127,9 +128,9 @@ WINDOW_SIZE=${WINDOW_SIZE:-1024}
 if [ -z "${ATTN_PRESET+x}" ]; then
     case ${ATTN_BACKEND:-auto} in
         fused) ATTN_PRESET=cudnn ;;
-        auto|flash|unfused) ATTN_PRESET=${ATTN_BACKEND:-auto} ;;
+        auto|flash|fa3|unfused) ATTN_PRESET=${ATTN_BACKEND:-auto} ;;
         *)
-            echo "Unknown ATTN_BACKEND: ${ATTN_BACKEND}. Choose: auto, flash, fused, unfused"
+            echo "Unknown ATTN_BACKEND: ${ATTN_BACKEND}. Choose: auto, flash, fa3, fused, unfused"
             exit 1
             ;;
     esac
@@ -144,6 +145,22 @@ unset NVTE_FUSED_ATTN
 unset NVTE_UNFUSED_ATTN
 unset NVTE_FUSED_ATTN_BACKEND
 unset NVTE_FUSED_ATTN_USE_FAv2_BWD'
+        ;;
+    fa3)
+        RESOLVED_ATTN_BACKEND=flash
+        BACKEND_ENV_BLOCK='
+export NVTE_FLASH_ATTN=1
+export NVTE_FUSED_ATTN=0
+export NVTE_UNFUSED_ATTN=0
+unset NVTE_FUSED_ATTN_BACKEND
+unset NVTE_FUSED_ATTN_USE_FAv2_BWD
+export MEGATRON_FA3_CORE_ATTN=1
+export FA3_USERBASE=${FA3_USERBASE:-/iopsstor/scratch/cscs/$USER/gipfelsturm/fa3_probe_minimal/python_userbase}
+export PYTHONPATH="$FA3_USERBASE/lib/python3.12/site-packages:${PYTHONPATH:-}"
+python - <<'"'"'PY'"'"'
+from flash_attn_interface import flash_attn_func
+print("FA3 core attention enabled via", flash_attn_func)
+PY'
         ;;
     flash)
         RESOLVED_ATTN_BACKEND=flash
@@ -173,14 +190,22 @@ unset NVTE_FUSED_ATTN_BACKEND
 unset NVTE_FUSED_ATTN_USE_FAv2_BWD'
         ;;
     *)
-        echo "Unknown ATTN_PRESET: $ATTN_PRESET. Choose: auto, flash, cudnn, unfused"
+        echo "Unknown ATTN_PRESET: $ATTN_PRESET. Choose: auto, flash, fa3, cudnn, unfused"
         exit 1
         ;;
 esac
 
-if [ -n "${ATTN_BACKEND:-}" ] && [ "$ATTN_BACKEND" != "$RESOLVED_ATTN_BACKEND" ]; then
+if [ -n "${ATTN_BACKEND:-}" ] && [ "$ATTN_BACKEND" != "$RESOLVED_ATTN_BACKEND" ] && [ "$ATTN_PRESET" != "fa3" ]; then
     echo "ATTN_BACKEND=$ATTN_BACKEND conflicts with ATTN_PRESET=$ATTN_PRESET, which resolves to $RESOLVED_ATTN_BACKEND"
     exit 1
+fi
+
+HEAD_DIM=$((HIDDEN / HEADS))
+if [ "$ATTN_PRESET" = "fa3" ]; then
+    if [ "$HEAD_DIM" -ne 128 ] || [ "$TP" -ne 1 ] || [ "$PP" -ne 1 ]; then
+        echo "ATTN_PRESET=fa3 currently requires head_dim=128, TP=1, PP=1 because the local FA3 build was pruned to the 8B benchmark shape. Got head_dim=$HEAD_DIM TP=$TP PP=$PP."
+        exit 1
+    fi
 fi
 
 case $ATTN_MASK in
