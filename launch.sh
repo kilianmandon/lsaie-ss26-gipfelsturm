@@ -156,10 +156,12 @@ unset NVTE_FUSED_ATTN_BACKEND
 unset NVTE_FUSED_ATTN_USE_FAv2_BWD
 export MEGATRON_FA3_CORE_ATTN=1
 export FA3_USERBASE=${FA3_USERBASE:-/iopsstor/scratch/cscs/$USER/gipfelsturm/fa3_probe_minimal/python_userbase}
-export PYTHONPATH="$FA3_USERBASE/lib/python3.12/site-packages:${PYTHONPATH:-}"
+export FA3_SHIM_DIR=${FA3_SHIM_DIR:-$WORKDIR/fa3_shim}
+export PYTHONPATH="$FA3_SHIM_DIR:$FA3_USERBASE/lib/python3.12/site-packages:${PYTHONPATH:-}"
 python - <<'"'"'PY'"'"'
 from flash_attn_interface import flash_attn_func
-print("FA3 core attention enabled via", flash_attn_func)
+from flash_attn_3.flash_attn_interface import flash_attn_func as te_flash_attn_func
+print("FA3 core attention enabled via", flash_attn_func, te_flash_attn_func)
 PY'
         ;;
     flash)
