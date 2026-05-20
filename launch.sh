@@ -16,7 +16,8 @@
 #            ./launch.sh train 760m 5000
 #            ./launch.sh train 1.5b 3000 8
 #            SUBMIT=0 ATTN_PRESET=flash ./launch.sh attention-bench 760m 80 1
-#            SUBMIT=0 ATTN_PRESET=fa3 ./launch.sh attention-bench 760m 5 1
+#            SUBMIT=0 ATTN_PRESET=fa3 ./launch.sh attention-bench 8b 5 1
+#            SUBMIT=0 ATTN_PRESET=fa4 ./launch.sh attention-bench 8b 5 1
 
 set -euo pipefail
 
@@ -128,9 +129,9 @@ WINDOW_SIZE=${WINDOW_SIZE:-1024}
 if [ -z "${ATTN_PRESET+x}" ]; then
     case ${ATTN_BACKEND:-auto} in
         fused) ATTN_PRESET=cudnn ;;
-        auto|flash|fa3|unfused) ATTN_PRESET=${ATTN_BACKEND:-auto} ;;
+        auto|flash|fa3|fa4|unfused) ATTN_PRESET=${ATTN_BACKEND:-auto} ;;
         *)
-            echo "Unknown ATTN_BACKEND: ${ATTN_BACKEND}. Choose: auto, flash, fa3, fused, unfused"
+            echo "Unknown ATTN_BACKEND: ${ATTN_BACKEND}. Choose: auto, flash, fa3, fa4, fused, unfused"
             exit 1
             ;;
     esac
@@ -168,6 +169,22 @@ else
     echo "Skipping pre-srun FA3 import check because python is not on the batch host PATH."
 fi'
         ;;
+    fa4)
+        RESOLVED_ATTN_BACKEND=flash
+        BACKEND_ENV_BLOCK='
+export NVTE_FLASH_ATTN=1
+export NVTE_FUSED_ATTN=0
+export NVTE_UNFUSED_ATTN=0
+unset NVTE_FUSED_ATTN_BACKEND
+unset NVTE_FUSED_ATTN_USE_FAv2_BWD
+export MEGATRON_FA4_CORE_ATTN=1
+export FA4_USERBASE=${FA4_USERBASE:-/iopsstor/scratch/cscs/$USER/gipfelsturm/fa4_probe/python_userbase}
+export FA4_SITE_PACKAGES=$FA4_USERBASE/lib/python3.12/site-packages
+export FA4_CUTLASS_PACKAGES=$FA4_SITE_PACKAGES/nvidia_cutlass_dsl/python_packages
+export CUTE_DSL_CACHE_DIR=${CUTE_DSL_CACHE_DIR:-/iopsstor/scratch/cscs/$USER/gipfelsturm/fa4_probe/cute_cache}
+export PYTHONPATH="$FA4_SITE_PACKAGES:$FA4_CUTLASS_PACKAGES:${PYTHONPATH:-}"
+echo "FA4 core attention enabled from FA4_USERBASE=$FA4_USERBASE"'
+        ;;
     flash)
         RESOLVED_ATTN_BACKEND=flash
         BACKEND_ENV_BLOCK='
@@ -196,12 +213,12 @@ unset NVTE_FUSED_ATTN_BACKEND
 unset NVTE_FUSED_ATTN_USE_FAv2_BWD'
         ;;
     *)
-        echo "Unknown ATTN_PRESET: $ATTN_PRESET. Choose: auto, flash, fa3, cudnn, unfused"
+        echo "Unknown ATTN_PRESET: $ATTN_PRESET. Choose: auto, flash, fa3, fa4, cudnn, unfused"
         exit 1
         ;;
 esac
 
-if [ -n "${ATTN_BACKEND:-}" ] && [ "$ATTN_BACKEND" != "$RESOLVED_ATTN_BACKEND" ] && [ "$ATTN_PRESET" != "fa3" ]; then
+if [ -n "${ATTN_BACKEND:-}" ] && [ "$ATTN_BACKEND" != "$RESOLVED_ATTN_BACKEND" ] && [ "$ATTN_PRESET" != "fa3" ] && [ "$ATTN_PRESET" != "fa4" ]; then
     echo "ATTN_BACKEND=$ATTN_BACKEND conflicts with ATTN_PRESET=$ATTN_PRESET, which resolves to $RESOLVED_ATTN_BACKEND"
     exit 1
 fi
@@ -210,6 +227,12 @@ HEAD_DIM=$((HIDDEN / HEADS))
 if [ "$ATTN_PRESET" = "fa3" ]; then
     if [ "$HEAD_DIM" -ne 128 ] || [ "$TP" -ne 1 ] || [ "$PP" -ne 1 ]; then
         echo "ATTN_PRESET=fa3 currently requires head_dim=128, TP=1, PP=1 because the local FA3 build was pruned to the 8B benchmark shape. Got head_dim=$HEAD_DIM TP=$TP PP=$PP."
+        exit 1
+    fi
+fi
+if [ "$ATTN_PRESET" = "fa4" ]; then
+    if [ "$HEAD_DIM" -ne 128 ] || [ "$TP" -ne 1 ] || [ "$PP" -ne 1 ]; then
+        echo "ATTN_PRESET=fa4 currently requires head_dim=128, TP=1, PP=1 for the guarded 8B benchmark path. Got head_dim=$HEAD_DIM TP=$TP PP=$PP."
         exit 1
     fi
 fi
@@ -338,9 +361,11 @@ mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR
 cd $MEGATRON_LM_DIR
 flock $WORKDIR/logs/megatron-patch.lock bash -c "
 cd $MEGATRON_LM_DIR
-if git apply --check $WORKDIR/patches/*.patch 2>/dev/null; then
-    git apply $WORKDIR/patches/*.patch
-elif git apply --reverse --check $WORKDIR/patches/*.patch 2>/dev/null; then
+PATCH_FILES=\$(find $WORKDIR/patches -maxdepth 1 -name '*.patch' | sort)
+LAST_PATCH=\$(printf '%s\n' \$PATCH_FILES | tail -n 1)
+if git apply --check \$PATCH_FILES 2>/dev/null; then
+    git apply \$PATCH_FILES
+elif git apply --reverse --check \$LAST_PATCH 2>/dev/null; then
     echo 'Megatron patches already applied.'
 else
     echo 'Megatron patch state is neither clean nor already applied.'
@@ -538,7 +563,7 @@ chmod +x "$SCRIPT"
 echo "Generated: $SCRIPT"
 if [ "$SUBMIT" = "1" ]; then
     unset SBATCH_PARTITION
-    sbatch --parsable -A "$SBATCH_ACCOUNT" -p "$SLURM_PARTITION" "$SCRIPT"
+    sbatch --parsable -A "$SBATCH_ACCOUNT" "$SCRIPT"
 else
     echo "SUBMIT=$SUBMIT, not submitting."
 fi

@@ -12,7 +12,7 @@ tensor_parallel_size: 1
 pipeline_parallel_size: 1
 
 # Lingfeng attention benchmark options
-# attention_preset: auto, flash, fa3, cudnn, or unfused
+# attention_preset: auto, flash, fa3, fa4, cudnn, or unfused
 attention_preset: auto
 attention_mask: causal
 window_size: 1024

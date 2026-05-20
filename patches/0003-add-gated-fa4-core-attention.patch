@@ -1,0 +1,151 @@
+diff --git a/megatron/core/extensions/transformer_engine_spec_provider.py b/megatron/core/extensions/transformer_engine_spec_provider.py
+index df38a9605..abe178613 100644
+--- a/megatron/core/extensions/transformer_engine_spec_provider.py
++++ b/megatron/core/extensions/transformer_engine_spec_provider.py
+@@ -57,6 +57,10 @@ class TESpecProvider(BackendSpecProvider):
+ 
+     def core_attention(self) -> type:
+         """Which module to use for attention"""
++        if os.getenv("MEGATRON_FA4_CORE_ATTN") == "1":
++            from megatron.core.transformer.fa4_dot_product_attention import FA4DotProductAttention
++
++            return FA4DotProductAttention
+         if os.getenv("MEGATRON_FA3_CORE_ATTN") == "1":
+             from megatron.core.transformer.fa3_dot_product_attention import FA3DotProductAttention
+ 
+diff --git a/megatron/core/transformer/fa4_dot_product_attention.py b/megatron/core/transformer/fa4_dot_product_attention.py
+new file mode 100644
+--- /dev/null
++++ b/megatron/core/transformer/fa4_dot_product_attention.py
+@@ -0,0 +1,131 @@
++# Copyright (c) 2026, ETH Zurich LSAIE course project contributors.
++
++import importlib
++import os
++import sys
++from pathlib import Path
++from typing import Optional
++
++import torch
++from torch import Tensor
++
++from megatron.core.packed_seq_params import PackedSeqParams
++from megatron.core.process_groups_config import ProcessGroupCollection
++from megatron.core.transformer.enums import AttnMaskType
++from megatron.core.transformer.module import MegatronModule
++from megatron.core.transformer.transformer_config import TransformerConfig
++from megatron.core.transformer.utils import is_layer_window_attention
++
++
++def _load_fa4_flash_attn_func():
++    userbase = os.getenv("FA4_USERBASE")
++    if userbase:
++        site_packages = Path(userbase) / "lib/python3.12/site-packages"
++        cutlass_packages = site_packages / "nvidia_cutlass_dsl/python_packages"
++        for path in (site_packages, cutlass_packages):
++            if path.is_dir() and str(path) not in sys.path:
++                sys.path.insert(0, str(path))
++
++        scratch_flash_attn = site_packages / "flash_attn"
++        if scratch_flash_attn.is_dir():
++            import flash_attn
++
++            scratch_path = str(scratch_flash_attn)
++            if scratch_path not in flash_attn.__path__:
++                flash_attn.__path__.insert(0, scratch_path)
++            importlib.invalidate_caches()
++
++    try:
++        from flash_attn.cute import flash_attn_func
++    except ImportError:
++        return None
++    return flash_attn_func
++
++
++flash_attn_func = _load_fa4_flash_attn_func()
++
++
++class FA4DotProductAttention(MegatronModule):
++    """FlashAttention-4/CuTe core attention for fixed-shape GPT training probes."""
++
++    def __init__(
++        self,
++        config: TransformerConfig,
++        layer_number: int,
++        attn_mask_type: AttnMaskType,
++        attention_type: str,
++        attention_dropout: Optional[float] = None,
++        softmax_scale: Optional[float] = None,
++        cp_comm_type: Optional[str] = None,
++        pg_collection: Optional[ProcessGroupCollection] = None,
++    ):
++        super().__init__(config=config)
++        if flash_attn_func is None:
++            raise ImportError(
++                "MEGATRON_FA4_CORE_ATTN=1 requires flash-attn-4 with flash_attn.cute "
++                "and nvidia-cutlass-dsl importable; set FA4_USERBASE to the scratch install."
++            )
++        if config.context_parallel_size != 1:
++            raise AssertionError("FA4DotProductAttention benchmark path does not support CP.")
++        dropout = config.attention_dropout if attention_dropout is None else attention_dropout
++        if dropout != 0.0:
++            raise AssertionError("FA4DotProductAttention benchmark path requires attention dropout 0.")
++
++        self.layer_number = max(1, layer_number)
++        self.attn_mask_type = attn_mask_type
++        self.attention_type = attention_type
++        self.softmax_scale = softmax_scale
++        self.current_max_attn_logits = None
++
++    def _window_size(self):
++        if is_layer_window_attention(
++            self.config.window_size, self.config.window_attn_skip_freq, self.layer_number
++        ):
++            window_size = self.config.window_size
++            if isinstance(window_size, int):
++                return (window_size, 0)
++            return tuple(window_size)
++        return (None, None)
++
++    def forward(
++        self,
++        query: Tensor,
++        key: Tensor,
++        value: Tensor,
++        attention_mask: Optional[Tensor],
++        attn_mask_type: Optional[AttnMaskType] = None,
++        attention_bias: Optional[Tensor] = None,
++        packed_seq_params: Optional[PackedSeqParams] = None,
++    ) -> torch.Tensor:
++        if packed_seq_params is not None:
++            raise AssertionError("FA4DotProductAttention does not support packed sequences.")
++        if attention_bias is not None:
++            raise AssertionError("FA4DotProductAttention does not support attention bias.")
++
++        mask_type = attn_mask_type or self.attn_mask_type
++        causal_masks = {
++            AttnMaskType.causal,
++            AttnMaskType.padding_causal,
++            AttnMaskType.causal_bottom_right,
++        }
++        if mask_type not in causal_masks:
++            raise AssertionError(f"FA4DotProductAttention only supports causal masks, got {mask_type}.")
++
++        q = query.transpose(0, 1).contiguous()
++        k = key.transpose(0, 1).contiguous()
++        v = value.transpose(0, 1).contiguous()
++        pack_gqa = q.size(2) != k.size(2)
++
++        out = flash_attn_func(
++            q,
++            k,
++            v,
++            softmax_scale=self.softmax_scale,
++            causal=True,
++            window_size=self._window_size(),
++            num_splits=1,
++            pack_gqa=pack_gqa,
++        )
++        if isinstance(out, tuple):
++            out = out[0]
++        return out.transpose(0, 1).contiguous().view(query.size(0), query.size(1), -1)

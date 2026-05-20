@@ -78,6 +78,11 @@ def launch(mode, model_size, config, training_steps=None, nodes=4, dry_run=False
             f'the local FA3 build was pruned to the 8B benchmark shape. Got '
             f'head_dim={head_dim}, TP={tp}, PP={pp}.'
         )
+    if attention_preset == 'fa4' and (head_dim != 128 or tp != 1 or pp != 1):
+        raise ValueError(
+            'attention_preset=fa4 currently requires head_dim=128, TP=1, PP=1 '
+            f'for the guarded 8B benchmark path. Got head_dim={head_dim}, TP={tp}, PP={pp}.'
+        )
     attention_mask = config.get('attention_mask', 'causal')
     window_size = int(config.get('window_size', 1024))
     attention_backend, backend_env_block = attention_settings(attention_preset, attention_backend_config)
@@ -145,7 +150,6 @@ fi'''
                 'sbatch',
                 '--parsable',
                 '-A', str(config.get('account', 'lsaie-ss26')),
-                '-p', str(config.get('partition', 'normal')),
                 str(script_location),
             ],
             check=True,
@@ -162,7 +166,7 @@ def attention_settings(attention_preset, attention_backend=None):
     }
     preset = aliases.get(attention_preset, attention_preset)
     backend = aliases.get(attention_backend, attention_backend) if attention_backend else None
-    if preset == 'fa3' and backend in (None, 'fa3', 'flash'):
+    if preset in ('fa3', 'fa4') and backend in (None, preset, 'flash'):
         backend = preset
     if backend is not None and backend != preset:
         raise ValueError(
@@ -198,6 +202,21 @@ else
     echo "Skipping pre-srun FA3 import check because python is not on the batch host PATH."
 fi
 '''
+    if preset == 'fa4':
+        return 'flash', '''
+export NVTE_FLASH_ATTN=1
+export NVTE_FUSED_ATTN=0
+export NVTE_UNFUSED_ATTN=0
+unset NVTE_FUSED_ATTN_BACKEND
+unset NVTE_FUSED_ATTN_USE_FAv2_BWD
+export MEGATRON_FA4_CORE_ATTN=1
+export FA4_USERBASE=${FA4_USERBASE:-/iopsstor/scratch/cscs/$USER/gipfelsturm/fa4_probe/python_userbase}
+export FA4_SITE_PACKAGES=$FA4_USERBASE/lib/python3.12/site-packages
+export FA4_CUTLASS_PACKAGES=$FA4_SITE_PACKAGES/nvidia_cutlass_dsl/python_packages
+export CUTE_DSL_CACHE_DIR=${CUTE_DSL_CACHE_DIR:-/iopsstor/scratch/cscs/$USER/gipfelsturm/fa4_probe/cute_cache}
+export PYTHONPATH="$FA4_SITE_PACKAGES:$FA4_CUTLASS_PACKAGES:${PYTHONPATH:-}"
+echo "FA4 core attention enabled from FA4_USERBASE=$FA4_USERBASE"
+'''
     if preset == 'flash':
         return 'flash', '''
 export NVTE_FLASH_ATTN=1
@@ -222,7 +241,7 @@ export NVTE_UNFUSED_ATTN=1
 unset NVTE_FUSED_ATTN_BACKEND
 unset NVTE_FUSED_ATTN_USE_FAv2_BWD
 '''
-    raise ValueError(f'Unknown attention_preset: {attention_preset}. Must be auto, flash, fa3, cudnn, or unfused.')
+    raise ValueError(f'Unknown attention_preset: {attention_preset}. Must be auto, flash, fa3, fa4, cudnn, or unfused.')
 
 
 def sbatch_directives(job_name, nodes, time, config):
@@ -320,9 +339,11 @@ mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR
 cd $MEGATRON_LM_DIR
 flock $WORKDIR/logs/megatron-patch.lock bash -c "
 cd $MEGATRON_LM_DIR
-if git apply --check $WORKDIR/patches/*.patch 2>/dev/null; then
-    git apply $WORKDIR/patches/*.patch
-elif git apply --reverse --check $WORKDIR/patches/*.patch 2>/dev/null; then
+PATCH_FILES=\$(find $WORKDIR/patches -maxdepth 1 -name '*.patch' | sort)
+LAST_PATCH=\$(printf '%s\n' \$PATCH_FILES | tail -n 1)
+if git apply --check \$PATCH_FILES 2>/dev/null; then
+    git apply \$PATCH_FILES
+elif git apply --reverse --check \$LAST_PATCH 2>/dev/null; then
     echo 'Megatron patches already applied.'
 else
     echo 'Megatron patch state is neither clean nor already applied.'
