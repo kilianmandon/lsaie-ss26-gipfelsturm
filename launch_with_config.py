@@ -331,7 +331,7 @@ def script_setup(config):
         [f'    {s}' for s in transformer_engine_flags]
     )
 
-    return f'''
+    return rf'''
 #########################################
 
 mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR
