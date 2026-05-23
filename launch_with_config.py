@@ -130,6 +130,7 @@ fi'''
         attention_preset, attention_backend, attention_mask, window_size, window_desc,
     )
     whole_script += script_setup(config)
+    whole_script += profiling_args(config)
     whole_script += script_attention(backend_env_block, attention_backend, attention_mask, window_size)
     whole_script += script_model(num_layers, hidden, ffn, heads, kv_heads)
     whole_script += script_training(eval_interval, eval_iters, lr_warmup_iters)
@@ -302,6 +303,34 @@ EXP_NAME={mode}-{model_size}-{attention_preset}-{attention_mask}{window_desc}-se
 LOG_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/$PROJECT_NAME/$EXP_NAME
 TENSORBOARD_DIR=$LOG_DIR/tensorboard
 '''
+
+def profiling_args(config):
+    if config['memory_profiling']:
+        flags = [
+            '--use-pytorch-profiler',
+            '--record-memory-history',
+            '--memory-snapshot-path $WORKDIR/logs/memory-$EXP_NAME.pkl'
+        ]
+    else:
+        flags = []
+
+    profiling_args_string = '\n'.join(
+        [f'    {s}' for s in flags]
+    )
+
+    if profiling_args_string:
+        return rf'''
+PROFILING_ARGS=(
+{profiling_args_string}
+)
+'''
+    else:
+        return rf'''
+PROFILING_ARGS = ()
+'''
+
+
+    
 
 def script_setup(config):
     transformer_engine_flags = [
@@ -500,7 +529,8 @@ TRAINING_CMD="torchrun ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \\
     ${ATTENTION_ARGS[@]} \\
     ${LOGGING_ARGS[@]} \\
     ${TOKENIZER_ARGS[@]} \\
-    ${DATA_ARGS[@]}"
+    ${DATA_ARGS[@]} \\
+    ${PROFILING_ARGS[@]}"
 '''
 
 

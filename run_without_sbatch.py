@@ -1,6 +1,11 @@
 import argparse
 from pathlib import Path
 import re
+import subprocess
+import os
+import stat
+
+
 
 def convert(sbatch_path):
     with open(sbatch_path, 'r') as f:
@@ -27,8 +32,17 @@ def convert(sbatch_path):
     local_script = local_script.replace('DATA_PREFIX=/capstor/store/cscs/swissai/infra01/datasets/nvidia/Nemotron-ClimbMix/climbmix_small_megatron/climbmix_small', 'DATA_PREFIX=${WORKDIR}/local_data/climbmix_small')
     local_script = local_script.replace('DATASET_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/cache', 'DATASET_CACHE_DIR=${WORKDIR}/local_data/climbmix_small')
 
-    with open(f'logs/local-{sbatch_path.name}', 'w') as f:
+    script_path = f'logs/local-{sbatch_path.stem}.sh'
+
+    with open(script_path, 'w') as f:
         f.write(local_script)
+
+    st = os.stat(script_path)
+    os.chmod(script_path, st.st_mode | stat.S_IEXEC)
+
+    log_file = f'logs/log-{job_name}.txt'
+    with open(log_file, 'w') as f:
+        subprocess.call([script_path] , stdout=f, stderr=f)
 
 if __name__=='__main__':
     import argparse

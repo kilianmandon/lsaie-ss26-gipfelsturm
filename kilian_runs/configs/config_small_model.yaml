@@ -1,0 +1,3 @@
+seq_len: 2048
+global_batch_size: 128
+memory_profiling: true

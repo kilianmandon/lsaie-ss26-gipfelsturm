@@ -1,6 +1,7 @@
 # Kilian Options
 precision: bf16
 activation_offloading: false
+memory_profiling: false
 
 # Shared run options
 account: lsaie-ss26

@@ -1,4 +1,5 @@
 logs/
+local_data/
 data/climbmix_small/
 config.sh
 slurm-*.out
