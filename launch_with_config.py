@@ -58,6 +58,15 @@ def launch(mode, model_size, config, training_steps=None, nodes=4, dry_run=False
     else:
         raise ValueError(f'Unknown model size: {model_size}. Must be either 125m, 350m, 760m, 1.5b, 3b, 8b.')
 
+    config['transformer_dimensions'] = {
+        'num_layers': num_layers,
+        'hidden': hidden,
+        'ffn': ffn,
+        'heads': heads,
+        'kv_heads': kv_heads,
+        'mbs': mbs,
+    }
+
     mbs = int(config.get('micro_batch_size') or mbs)
     gbs = int(config.get('global_batch_size', 256))
     seq_len = int(config.get('seq_len', 4096))
@@ -130,7 +139,7 @@ fi'''
         attention_preset, attention_backend, attention_mask, window_size, window_desc,
     )
     whole_script += script_setup(config)
-    whole_script += profiling_args(config)
+    whole_script += profiling_and_offloading_args(config)
     whole_script += script_attention(backend_env_block, attention_backend, attention_mask, window_size)
     whole_script += script_model(num_layers, hidden, ffn, heads, kv_heads)
     whole_script += script_training(eval_interval, eval_iters, lr_warmup_iters)
@@ -304,7 +313,7 @@ LOG_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/$PROJECT_NAME/$EXP_NAME
 TENSORBOARD_DIR=$LOG_DIR/tensorboard
 '''
 
-def profiling_args(config):
+def profiling_and_offloading_args(config):
     if config['memory_profiling']:
         flags = [
             '--use-pytorch-profiler',
@@ -313,6 +322,9 @@ def profiling_args(config):
         ]
     else:
         flags = []
+
+    if config['activation_offloading']:
+        flags += [f'--cpu-offloading-num-layers {config["transformer_dimensions"]["num_layers"]-1}']
 
     profiling_args_string = '\n'.join(
         [f'    {s}' for s in flags]
