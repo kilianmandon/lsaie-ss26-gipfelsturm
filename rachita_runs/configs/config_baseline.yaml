@@ -1,0 +1,6 @@
+# Rachita baseline: no torch.compile, no CUDA Graphs, no Quack.
+# Used as the reference number for the kernel-overhead / kernel-fusion axis.
+torch_compile: false
+cuda_graph_impl: null
+use_quack: false
+context_parallel_size: 1

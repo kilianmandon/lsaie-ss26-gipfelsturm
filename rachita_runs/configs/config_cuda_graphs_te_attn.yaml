@@ -1,0 +1,7 @@
+# Megatron CUDA graphs via TransformerEngine, scoped to attention only.
+# Lets us A/B the attention-block launch overhead in isolation.
+cuda_graph_impl: transformer_engine
+cuda_graph_scope:
+  - attn
+cuda_graph_warmup_steps: 1
+activation_offloading: false

@@ -1,0 +1,7 @@
+# torch.compile per-TransformerLayer, default Inductor mode.
+torch_compile: true
+torch_compile_mode: default
+torch_compile_backend: inductor
+torch_compile_target: layers
+torch_compile_fullgraph: false
+torch_compile_dynamic: false

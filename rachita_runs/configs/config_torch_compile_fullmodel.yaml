@@ -1,0 +1,14 @@
+# torch.compile on the whole top-level model (vs. the per-TransformerLayer
+# scope used by config_torch_compile.yaml). Same default Inductor mode so
+# the only varied axis is the compile scope.
+#
+# Risk: full-model compile is more likely to hit graph breaks under
+# Megatron's TP collectives, pipeline send/recv, and activation
+# checkpointing than per-layer compile. The wrapper falls back gracefully
+# (warning + uncompiled model) if torch.compile itself raises.
+torch_compile: true
+torch_compile_mode: default
+torch_compile_backend: inductor
+torch_compile_target: model
+torch_compile_fullgraph: false
+torch_compile_dynamic: false

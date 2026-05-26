@@ -1,0 +1,10 @@
+# torch.compile, mode=reduce-overhead.
+# Inductor will automatically capture CUDA graphs of the compiled regions, which
+# is the cleanest "torch.compile + CUDA graphs" combination available without
+# touching Megatron's training loop.
+torch_compile: true
+torch_compile_mode: reduce-overhead
+torch_compile_backend: inductor
+torch_compile_target: layers
+torch_compile_fullgraph: false
+torch_compile_dynamic: false

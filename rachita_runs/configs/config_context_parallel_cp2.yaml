@@ -1,0 +1,9 @@
+# Stretch goal: TransformerEngine context parallel, CP=2, seq_len=8192.
+# Requires at least 2 GPUs (typically run with -n 1 = 4 GPUs).
+# Megatron + TE handle the CP plumbing; we just toggle the flag.
+context_parallel_size: 2
+seq_len: 8192
+# CUDA graphs interact poorly with CP=local; use TE impl if you also want CG.
+cuda_graph_impl: null
+torch_compile: false
+use_quack: false

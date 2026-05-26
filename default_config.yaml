@@ -19,3 +19,23 @@ attention_mask: causal
 window_size: 1024
 walltime: "00:30:00"
 training_steps: 80
+
+# Rachita options
+# All keys default to "off" so non-Rachita configs are unaffected
+torch_compile: false
+torch_compile_mode: default          # default | reduce-overhead | max-autotune
+torch_compile_backend: inductor
+torch_compile_target: layers         # layers (per TransformerLayer) | model
+torch_compile_fullgraph: false
+torch_compile_dynamic: false
+cuda_graph_impl:                     # null | local | transformer_engine
+cuda_graph_warmup_steps: 1
+cuda_graph_scope:                    # null or list e.g. [attn, mlp]
+use_quack: false
+quack_ops:                           # null defaults to [rmsnorm, cross_entropy]
+context_parallel_size: 1
+# General PyTorch CUDA allocator tuning (orthogonal to kernel-fusion toggles
+# above; useful for memory-fragmentation experiments at larger micro-batch).
+# Set to e.g. "expandable_segments:True" to reduce reserved-but-unallocated
+# memory; null means leave PyTorch's default behaviour untouched.
+pytorch_cuda_alloc_conf:

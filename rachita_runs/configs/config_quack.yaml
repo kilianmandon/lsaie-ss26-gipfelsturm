@@ -1,0 +1,8 @@
+# Quack fused kernels for RMSNorm (and cross-entropy if available).
+# Requires `quack` to be importable in the alps3 environment, see
+# rachita_runs/README.md "Risks, fallbacks, ..." section. If Quack is missing
+# the wrapper logs a warning and runs upstream kernels.
+use_quack: true
+quack_ops:
+  - rmsnorm
+  - cross_entropy
