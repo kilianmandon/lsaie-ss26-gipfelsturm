@@ -1,0 +1,13 @@
+# torch.compile, mode=max-autotune.
+# Long compile (several minutes first time), expected best steady-state. Use
+# at least training_steps: 80 so steady-state dominates the average.
+# walltime is bumped to 1 h so a cold TORCHINDUCTOR cache doesn't time-out;
+# subsequent runs reuse the cache and finish well under 30 min.
+torch_compile: true
+torch_compile_mode: max-autotune
+torch_compile_backend: inductor
+torch_compile_target: layers
+torch_compile_fullgraph: false
+torch_compile_dynamic: false
+training_steps: 80
+walltime: "01:00:00"

@@ -1,0 +1,6 @@
+# Megatron native CUDA graphs, "local" implementation (1 graph per
+# TransformerLayer). Works with --use-distributed-optimizer.
+cuda_graph_impl: local
+cuda_graph_warmup_steps: 1
+# Activation offloading is incompatible with CUDA graphs - explicit off.
+activation_offloading: false

@@ -1,0 +1,5 @@
+# Megatron CUDA graphs via TransformerEngine make_graphed_callables.
+# Whole-TransformerLayer scope (default; cuda_graph_scope intentionally unset).
+cuda_graph_impl: transformer_engine
+cuda_graph_warmup_steps: 1
+activation_offloading: false

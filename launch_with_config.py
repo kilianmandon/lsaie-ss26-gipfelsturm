@@ -6,7 +6,9 @@ def launch(mode, model_size, config, training_steps=None, nodes=4, dry_run=False
     if mode=='throughput':
         if training_steps is None:
             training_steps = 50
-        time = '00:30:00'
+        # `walltime` from YAML lets long-compile configs (e.g. max-autotune)
+        # request more than the default 30 min without editing this file.
+        time = str(config.get('walltime') or '00:30:00')
         eval_interval=training_steps
         eval_iters=0
         lr_warmup_iters=10
@@ -15,7 +17,7 @@ def launch(mode, model_size, config, training_steps=None, nodes=4, dry_run=False
     elif mode=='train':
         if training_steps is None:
             raise ValueError('training_steps must be explicitly set for train runs.')
-        time = '02:30:00'
+        time = str(config.get('walltime') or '02:30:00')
         eval_interval=1000
         eval_iters=10
         lr_warmup_iters=200
@@ -58,15 +60,6 @@ def launch(mode, model_size, config, training_steps=None, nodes=4, dry_run=False
     else:
         raise ValueError(f'Unknown model size: {model_size}. Must be either 125m, 350m, 760m, 1.5b, 3b, 8b.')
 
-    config['transformer_dimensions'] = {
-        'num_layers': num_layers,
-        'hidden': hidden,
-        'ffn': ffn,
-        'heads': heads,
-        'kv_heads': kv_heads,
-        'mbs': mbs,
-    }
-
     mbs = int(config.get('micro_batch_size') or mbs)
     gbs = int(config.get('global_batch_size', 256))
     seq_len = int(config.get('seq_len', 4096))
@@ -103,9 +96,17 @@ def launch(mode, model_size, config, training_steps=None, nodes=4, dry_run=False
     else:
         raise ValueError(f'Unknown attention_mask: {attention_mask}. Must be causal or sliding.')
 
+    context_parallel_size = int(config.get('context_parallel_size', 1) or 1)
+    if context_parallel_size < 1:
+        raise ValueError(f'context_parallel_size must be >= 1, got {context_parallel_size}.')
+
     world_size = nodes * 4
-    if world_size % (tp * pp) != 0:
-        raise ValueError(f'World size {world_size} is not divisible by TP*PP={tp * pp}.')
+    model_parallel = tp * pp * context_parallel_size
+    if world_size % model_parallel != 0:
+        raise ValueError(
+            f'World size {world_size} is not divisible by TP*PP*CP='
+            f'{tp}*{pp}*{context_parallel_size}={model_parallel}.'
+        )
 
     job_name=f'gipfel-{mode}-{model_size}-{attention_preset}-{attention_mask}{window_desc}-{seq_len}seq-{mbs}mbs-{gbs}gbs-{nodes}n'
 
@@ -139,14 +140,17 @@ fi'''
         attention_preset, attention_backend, attention_mask, window_size, window_desc,
     )
     whole_script += script_setup(config)
-    whole_script += profiling_and_offloading_args(config)
+    whole_script += profiling_args(config)
+    whole_script += rachita_env_block(config)
+    whole_script += pytorch_alloc_env_block(config)
     whole_script += script_attention(backend_env_block, attention_backend, attention_mask, window_size)
     whole_script += script_model(num_layers, hidden, ffn, heads, kv_heads)
     whole_script += script_training(eval_interval, eval_iters, lr_warmup_iters)
     whole_script += script_rest(tp, pp)
 
     whole_script += f'{logging_extra})'
-    whole_script += script_tokenizer()
+    whole_script += rachita_extra_args(config, context_parallel_size)
+    whole_script += script_tokenizer(config)
     
     whole_script += f'\n{wandb_block}\n'
     whole_script += script_footer(config)
@@ -313,7 +317,7 @@ LOG_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/$PROJECT_NAME/$EXP_NAME
 TENSORBOARD_DIR=$LOG_DIR/tensorboard
 '''
 
-def profiling_and_offloading_args(config):
+def profiling_args(config):
     if config['memory_profiling']:
         flags = [
             '--use-pytorch-profiler',
@@ -322,9 +326,6 @@ def profiling_and_offloading_args(config):
         ]
     else:
         flags = []
-
-    if config['activation_offloading']:
-        flags += [f'--cpu-offloading-num-layers {config["transformer_dimensions"]["num_layers"]-1}']
 
     profiling_args_string = '\n'.join(
         [f'    {s}' for s in flags]
@@ -338,11 +339,119 @@ PROFILING_ARGS=(
 '''
     else:
         return rf'''
-PROFILING_ARGS = ()
+PROFILING_ARGS=()
 '''
 
 
-    
+def rachita_env_block(config):
+    """Export env vars consumed by rachita_runs/pretrain_gpt_rachita.py.
+
+    Emits no env vars (and no banner) when none of the Rachita features are
+    enabled, so other teammates' configs produce a script byte-identical to the
+    pre-Rachita launcher.
+    """
+    torch_compile = bool(config.get('torch_compile', False))
+    use_quack = bool(config.get('use_quack', False))
+    if not torch_compile and not use_quack:
+        return '\n# (no Rachita extensions enabled)\n'
+
+    lines = ['', '# Rachita extension env (toggled from YAML)']
+    if torch_compile:
+        lines.append('export MEGATRON_TORCH_COMPILE=1')
+        lines.append(
+            f'export MEGATRON_TORCH_COMPILE_MODE={config.get("torch_compile_mode", "default")}'
+        )
+        lines.append(
+            f'export MEGATRON_TORCH_COMPILE_BACKEND={config.get("torch_compile_backend", "inductor")}'
+        )
+        lines.append(
+            f'export MEGATRON_TORCH_COMPILE_TARGET={config.get("torch_compile_target", "layers")}'
+        )
+        lines.append(
+            f'export MEGATRON_TORCH_COMPILE_FULLGRAPH={"1" if config.get("torch_compile_fullgraph", False) else "0"}'
+        )
+        lines.append(
+            f'export MEGATRON_TORCH_COMPILE_DYNAMIC={"1" if config.get("torch_compile_dynamic", False) else "0"}'
+        )
+    if use_quack:
+        lines.append('export MEGATRON_USE_QUACK=1')
+        ops = config.get('quack_ops', ['rmsnorm', 'cross_entropy'])
+        if isinstance(ops, (list, tuple)):
+            ops_csv = ','.join(str(o) for o in ops)
+        else:
+            ops_csv = str(ops)
+        lines.append(f'export MEGATRON_QUACK_OPS={ops_csv}')
+
+    lines.append(
+        'export PYTHONPATH=$WORKDIR/rachita_runs:${PYTHONPATH:-}'
+    )
+    lines.append('echo "[rachita] torch_compile=${MEGATRON_TORCH_COMPILE:-0} quack=${MEGATRON_USE_QUACK:-0} mode=${MEGATRON_TORCH_COMPILE_MODE:-n/a} target=${MEGATRON_TORCH_COMPILE_TARGET:-n/a}"')
+    return '\n' + '\n'.join(lines) + '\n'
+
+
+def pytorch_alloc_env_block(config):
+    """Optional export of PYTORCH_CUDA_ALLOC_CONF for memory-tuning experiments.
+
+    Returns an empty string (and emits no banner) when the config key is
+    unset, so non-tuned configs produce a script byte-identical to the
+    pre-existing launcher output. When set, the value is exported verbatim,
+    e.g. ``expandable_segments:True`` to reduce reserved-but-unallocated
+    fragmentation, or ``garbage_collection_threshold:0.8``.
+    """
+    raw = config.get('pytorch_cuda_alloc_conf')
+    if raw is None or raw == '':
+        return ''
+    value = str(raw).strip()
+    return (
+        '\n# PyTorch allocator tuning (from YAML key pytorch_cuda_alloc_conf)\n'
+        f'export PYTORCH_CUDA_ALLOC_CONF={value}\n'
+        'echo "[pytorch] PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-<unset>}"\n'
+    )
+
+
+def rachita_extra_args(config, context_parallel_size):
+    """Build the RACHITA_ARGS=(...) bash array appended to TRAINING_CMD.
+
+    Adds Megatron-native flags for CUDA graphs and context parallelism. All
+    keys default to "off" so non-Rachita configs produce an empty RACHITA_ARGS
+    array, leaving the upstream behaviour untouched.
+    """
+    flags = []
+
+    cuda_graph_impl = config.get('cuda_graph_impl')
+    if cuda_graph_impl and cuda_graph_impl != 'none':
+        if cuda_graph_impl not in ('local', 'transformer_engine'):
+            raise ValueError(
+                f"cuda_graph_impl must be one of [null, none, local, transformer_engine], "
+                f"got {cuda_graph_impl!r}."
+            )
+        flags.append(f'--cuda-graph-impl {cuda_graph_impl}')
+        warmup = int(config.get('cuda_graph_warmup_steps', 1) or 1)
+        flags.append(f'--cuda-graph-warmup-steps {warmup}')
+
+        scope = config.get('cuda_graph_scope')
+        if scope:
+            if cuda_graph_impl != 'transformer_engine':
+                raise ValueError(
+                    "cuda_graph_scope is only supported with cuda_graph_impl=transformer_engine."
+                )
+            if isinstance(scope, str):
+                scope = [scope]
+            flags.append('--cuda-graph-scope ' + ' '.join(str(s) for s in scope))
+
+    if context_parallel_size and context_parallel_size > 1:
+        flags.append(f'--context-parallel-size {context_parallel_size}')
+
+    if not flags:
+        return '\nRACHITA_ARGS=()\n'
+
+    flag_block = '\n'.join(f'    {f}' for f in flags)
+    return f'''
+RACHITA_ARGS=(
+{flag_block}
+)
+'''
+
 
 def script_setup(config):
     transformer_engine_flags = [
@@ -382,11 +491,17 @@ flock $WORKDIR/logs/megatron-patch.lock bash -c "
 cd $MEGATRON_LM_DIR
 PATCH_FILES=\$(find $WORKDIR/patches -maxdepth 1 -name '*.patch' | sort)
 LAST_PATCH=\$(printf '%s\n' \$PATCH_FILES | tail -n 1)
-if git apply --check \$PATCH_FILES 2>/dev/null; then
-    git apply \$PATCH_FILES
-elif git apply --reverse --check \$LAST_PATCH 2>/dev/null; then
+# NOTE: 'git apply --check P1 P2 P3' does NOT simulate cumulative state across
+# patches in the same command, so a stacked patch (e.g. 0003 needs 0002) will
+# fail the dry-run on a clean tree even though the real cumulative apply works.
+# Order of checks below: (1) already-applied via reverse-check of last patch,
+# (2) real cumulative apply (which DOES handle stacking), (3) rollback + bail.
+if git apply --reverse --check \$LAST_PATCH 2>/dev/null; then
     echo 'Megatron patches already applied.'
+elif git apply \$PATCH_FILES 2>/dev/null; then
+    echo 'Megatron patches applied.'
 else
+    git checkout -- . 2>/dev/null || true
     echo 'Megatron patch state is neither clean nor already applied.'
     git status --short
     exit 1
@@ -504,8 +619,20 @@ LOGGING_ARGS=(
 '''
 
 
-def script_tokenizer():
-    return '''
+def script_tokenizer(config=None):
+    # Switch to Rachita's wrapper entrypoint only when a Rachita-only feature is
+    # active. Baseline / Kilian / Lingfeng configs keep using upstream pretrain_gpt.py.
+    use_wrapper = bool(
+        (config or {}).get('torch_compile', False)
+        or (config or {}).get('use_quack', False)
+    )
+    entrypoint = (
+        '$WORKDIR/rachita_runs/pretrain_gpt_rachita.py'
+        if use_wrapper
+        else '$MEGATRON_LM_DIR/pretrain_gpt.py'
+    )
+
+    return f'''
 
 TOKENIZER_ARGS=(
     --tokenizer-type GPT2BPETokenizer
@@ -529,20 +656,21 @@ TORCHRUN_ARGS=(
     --tee 3
 )
 
-TRAINING_CMD="torchrun ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \\
-    ${TRANSFORMER_ENGINE_ARGS[@]} \\
-    ${NETWORK_SIZE_ARGS[@]} \\
-    ${TRAINING_ARGS[@]} \\
-    ${REGULARIZATION_ARGS[@]} \\
-    ${LEARNING_RATE_ARGS[@]} \\
-    ${INITIALIZATION_ARGS[@]} \\
-    ${MIXED_PRECISION_ARGS[@]} \\
-    ${DISTRIBUTED_ARGS[@]} \\
-    ${ATTENTION_ARGS[@]} \\
-    ${LOGGING_ARGS[@]} \\
-    ${TOKENIZER_ARGS[@]} \\
-    ${DATA_ARGS[@]} \\
-    ${PROFILING_ARGS[@]}"
+TRAINING_CMD="torchrun ${{TORCHRUN_ARGS[@]}} {entrypoint} \\
+    ${{TRANSFORMER_ENGINE_ARGS[@]}} \\
+    ${{NETWORK_SIZE_ARGS[@]}} \\
+    ${{TRAINING_ARGS[@]}} \\
+    ${{REGULARIZATION_ARGS[@]}} \\
+    ${{LEARNING_RATE_ARGS[@]}} \\
+    ${{INITIALIZATION_ARGS[@]}} \\
+    ${{MIXED_PRECISION_ARGS[@]}} \\
+    ${{DISTRIBUTED_ARGS[@]}} \\
+    ${{ATTENTION_ARGS[@]}} \\
+    ${{LOGGING_ARGS[@]}} \\
+    ${{TOKENIZER_ARGS[@]}} \\
+    ${{DATA_ARGS[@]}} \\
+    ${{PROFILING_ARGS[@]}} \\
+    ${{RACHITA_ARGS[@]}}"
 '''
 
 

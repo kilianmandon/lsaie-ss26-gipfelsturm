@@ -1,0 +1,283 @@
+{
+  "failed": [
+    {
+      "log": "logs/gipfel-throughput-8b-auto-causalfull-4096seq-2mbs-256gbs-1n-2385435.log",
+      "n_steps_total": 0,
+      "reason": "no usable iterations after skip=10",
+      "variant": "torch_compile_reduce_overhead"
+    },
+    {
+      "log": "logs/gipfel-throughput-8b-auto-causalfull-4096seq-3mbs-240gbs-1n-2389488.log",
+      "n_steps_total": 1,
+      "reason": "no usable iterations after skip=10",
+      "variant": "baseline"
+    },
+    {
+      "log": "logs/gipfel-throughput-8b-auto-causalfull-4096seq-3mbs-240gbs-1n-2389489.log",
+      "n_steps_total": 0,
+      "reason": "no usable iterations after skip=10",
+      "variant": "cuda_graphs_local"
+    }
+  ],
+  "logs": {
+    "baseline": "logs/gipfel-throughput-8b-auto-causalfull-4096seq-2mbs-256gbs-1n-2383587.log",
+    "context_parallel_cp2": "logs/gipfel-throughput-8b-auto-causalfull-8192seq-2mbs-256gbs-1n-2385818.log",
+    "cuda_graphs_local": "logs/gipfel-throughput-8b-auto-causalfull-4096seq-2mbs-256gbs-1n-2384383.log",
+    "cuda_graphs_te": "logs/gipfel-throughput-8b-auto-causalfull-4096seq-2mbs-256gbs-1n-2384807.log",
+    "cuda_graphs_te_attn": "logs/gipfel-throughput-8b-auto-causalfull-4096seq-2mbs-256gbs-1n-2385147.log",
+    "quack": "logs/gipfel-throughput-8b-auto-causalfull-4096seq-2mbs-256gbs-1n-2384042.log",
+    "torch_compile_default": "logs/gipfel-throughput-8b-auto-causalfull-4096seq-2mbs-256gbs-1n-2383589.log",
+    "torch_compile_fullmodel": "logs/gipfel-throughput-8b-auto-causalfull-4096seq-2mbs-256gbs-1n-2385996.log"
+  },
+  "skip": 10,
+  "variants": {
+    "baseline": {
+      "compile_overhead_ms": 3775.7999999999993,
+      "first_step_elapsed_ms": 27899.0,
+      "lm_loss": {
+        "first": 12.21599,
+        "last": 6.661493,
+        "mean": 7.612253557142857
+      },
+      "median_step_elapsed_ms": 24123.2,
+      "memory_mb": {
+        "max_allocated_mb": 85667.83,
+        "max_reserved_mb": 89244.0,
+        "n_samples": 2,
+        "theoretical_activation_mb": 37482.97,
+        "theoretical_total_mb": 100926.25,
+        "theoretical_weight_optimizer_mb": 63443.29
+      },
+      "n_steps_total": 80,
+      "n_steps_used": 70,
+      "skipped": 10,
+      "tflops_per_gpu": {
+        "median": 503.5,
+        "p10": 501.9,
+        "p90": 507.6
+      },
+      "tokens_per_sec_per_gpu": {
+        "median": 10866.5,
+        "p10": 10833.0,
+        "p90": 10956.0
+      }
+    },
+    "context_parallel_cp2": {
+      "compile_overhead_ms": 6985.699999999997,
+      "first_step_elapsed_ms": 61043.5,
+      "lm_loss": {
+        "first": 11.76376,
+        "last": 6.964957,
+        "mean": 7.7197394363636365
+      },
+      "median_step_elapsed_ms": 54057.8,
+      "memory_mb": {
+        "max_allocated_mb": 85699.87,
+        "max_reserved_mb": 89566.0,
+        "n_samples": 4,
+        "theoretical_activation_mb": 74965.93,
+        "theoretical_total_mb": 159556.98,
+        "theoretical_weight_optimizer_mb": 84591.05
+      },
+      "n_steps_total": 65,
+      "n_steps_used": 55,
+      "skipped": 10,
+      "tflops_per_gpu": {
+        "median": 480.6,
+        "p10": 477.4,
+        "p90": 483.1
+      },
+      "tokens_per_sec_per_gpu": {
+        "median": 9699.0,
+        "p10": 9634.0,
+        "p90": 9748.0
+      }
+    },
+    "cuda_graphs_local": {
+      "compile_overhead_ms": 4370.449999999997,
+      "first_step_elapsed_ms": 29908.5,
+      "lm_loss": {
+        "first": 12.20271,
+        "last": 6.692011,
+        "mean": 7.642719828571429
+      },
+      "median_step_elapsed_ms": 25538.050000000003,
+      "memory_mb": {
+        "max_allocated_mb": 68044.59,
+        "max_reserved_mb": 93882.0,
+        "n_samples": 2,
+        "theoretical_activation_mb": 37482.97,
+        "theoretical_total_mb": 100926.25,
+        "theoretical_weight_optimizer_mb": 63443.29
+      },
+      "n_steps_total": 80,
+      "n_steps_used": 70,
+      "skipped": 10,
+      "tflops_per_gpu": {
+        "median": 475.6,
+        "p10": 473.3,
+        "p90": 480.6
+      },
+      "tokens_per_sec_per_gpu": {
+        "median": 10264.5,
+        "p10": 10215.0,
+        "p90": 10372.0
+      }
+    },
+    "cuda_graphs_te": {
+      "compile_overhead_ms": 3407.5,
+      "first_step_elapsed_ms": 28048.8,
+      "lm_loss": {
+        "first": 11.13535,
+        "last": 7.192834,
+        "mean": 7.951130785714286
+      },
+      "median_step_elapsed_ms": 24641.3,
+      "memory_mb": {
+        "max_allocated_mb": 85163.26,
+        "max_reserved_mb": 90976.0,
+        "n_samples": 2,
+        "theoretical_activation_mb": 37482.97,
+        "theoretical_total_mb": 100926.25,
+        "theoretical_weight_optimizer_mb": 63443.29
+      },
+      "n_steps_total": 80,
+      "n_steps_used": 70,
+      "skipped": 10,
+      "tflops_per_gpu": {
+        "median": 492.95,
+        "p10": 489.9,
+        "p90": 494.0
+      },
+      "tokens_per_sec_per_gpu": {
+        "median": 10638.0,
+        "p10": 10573.0,
+        "p90": 10662.0
+      }
+    },
+    "cuda_graphs_te_attn": {
+      "compile_overhead_ms": 3410.4000000000015,
+      "first_step_elapsed_ms": 27630.4,
+      "lm_loss": {
+        "first": 12.56584,
+        "last": 6.903238,
+        "mean": 7.7187630857142855
+      },
+      "median_step_elapsed_ms": 24220.0,
+      "memory_mb": {
+        "max_allocated_mb": 77636.81,
+        "max_reserved_mb": 88706.0,
+        "n_samples": 2,
+        "theoretical_activation_mb": 37482.97,
+        "theoretical_total_mb": 100926.25,
+        "theoretical_weight_optimizer_mb": 63443.29
+      },
+      "n_steps_total": 80,
+      "n_steps_used": 70,
+      "skipped": 10,
+      "tflops_per_gpu": {
+        "median": 501.5,
+        "p10": 498.6,
+        "p90": 503.1
+      },
+      "tokens_per_sec_per_gpu": {
+        "median": 10823.0,
+        "p10": 10762.0,
+        "p90": 10858.0
+      }
+    },
+    "quack": {
+      "compile_overhead_ms": 5521.850000000002,
+      "first_step_elapsed_ms": 29787.7,
+      "lm_loss": {
+        "first": 12.20345,
+        "last": 6.851582,
+        "mean": 7.766721271428572
+      },
+      "median_step_elapsed_ms": 24265.85,
+      "memory_mb": {
+        "max_allocated_mb": 85667.83,
+        "max_reserved_mb": 89244.0,
+        "n_samples": 2,
+        "theoretical_activation_mb": 37482.97,
+        "theoretical_total_mb": 100926.25,
+        "theoretical_weight_optimizer_mb": 63443.29
+      },
+      "n_steps_total": 80,
+      "n_steps_used": 70,
+      "skipped": 10,
+      "tflops_per_gpu": {
+        "median": 500.55,
+        "p10": 497.7,
+        "p90": 505.0
+      },
+      "tokens_per_sec_per_gpu": {
+        "median": 10803.0,
+        "p10": 10742.0,
+        "p90": 10900.0
+      }
+    },
+    "torch_compile_default": {
+      "compile_overhead_ms": 11030.849999999999,
+      "first_step_elapsed_ms": 35203.1,
+      "lm_loss": {
+        "first": 12.2104,
+        "last": 6.756018,
+        "mean": 7.699810985714286
+      },
+      "median_step_elapsed_ms": 24172.25,
+      "memory_mb": {
+        "max_allocated_mb": 85667.83,
+        "max_reserved_mb": 89340.0,
+        "n_samples": 2,
+        "theoretical_activation_mb": 37482.97,
+        "theoretical_total_mb": 100926.25,
+        "theoretical_weight_optimizer_mb": 63443.29
+      },
+      "n_steps_total": 80,
+      "n_steps_used": 70,
+      "skipped": 10,
+      "tflops_per_gpu": {
+        "median": 502.5,
+        "p10": 498.5,
+        "p90": 507.7
+      },
+      "tokens_per_sec_per_gpu": {
+        "median": 10844.5,
+        "p10": 10760.0,
+        "p90": 10958.0
+      }
+    },
+    "torch_compile_fullmodel": {
+      "compile_overhead_ms": 9940.0,
+      "first_step_elapsed_ms": 34294.0,
+      "lm_loss": {
+        "first": 11.08218,
+        "last": 6.745279,
+        "mean": 7.588434828571429
+      },
+      "median_step_elapsed_ms": 24354.0,
+      "memory_mb": {
+        "max_allocated_mb": 84095.73,
+        "max_reserved_mb": 87728.0,
+        "n_samples": 2,
+        "theoretical_activation_mb": 37482.97,
+        "theoretical_total_mb": 100926.25,
+        "theoretical_weight_optimizer_mb": 63443.29
+      },
+      "n_steps_total": 80,
+      "n_steps_used": 70,
+      "skipped": 10,
+      "tflops_per_gpu": {
+        "median": 498.70000000000005,
+        "p10": 496.2,
+        "p90": 502.9
+      },
+      "tokens_per_sec_per_gpu": {
+        "median": 10764.0,
+        "p10": 10710.0,
+        "p90": 10854.0
+      }
+    }
+  }
+}
