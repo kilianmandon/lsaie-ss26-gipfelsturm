@@ -3,3 +3,6 @@ local_data/
 data/climbmix_small/
 config.sh
 slurm-*.out
+
+kilian_runs/throughput_logs/
+kilian_runs/mem_prof_configs/logs_*/

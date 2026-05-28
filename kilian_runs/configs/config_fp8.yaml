@@ -1,0 +1,2 @@
+precision: fp8_transformer_engine
+activation_offloading: false

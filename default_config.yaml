@@ -5,7 +5,7 @@ memory_profiling: false
 
 # Shared run options
 account: lsaie-ss26
-partition: normal
+partition: debug
 seq_len: 4096
 global_batch_size: 256
 micro_batch_size:

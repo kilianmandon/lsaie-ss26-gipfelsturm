@@ -1,0 +1,3 @@
+precision: bf16
+activation_offloading: false
+memory_profiling: true

@@ -1,1 +1,2 @@
+precision: bf16
 activation_offloading: true
