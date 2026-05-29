@@ -59,7 +59,14 @@ def launch(mode, model_size, config, training_steps=None, nodes=4, dry_run=False
         num_layers=32; hidden=4096;ffn=14336;heads=32;kv_heads=8;mbs=2
     else:
         raise ValueError(f'Unknown model size: {model_size}. Must be either 125m, 350m, 760m, 1.5b, 3b, 8b.')
-
+    config['transformer_dimensions'] = {
+        'num_layers': num_layers,
+        'hidden': hidden,
+        'ffn': ffn,
+        'heads': heads,
+        'kv_heads': kv_heads,
+        'mbs': mbs,
+    }
     mbs = int(config.get('micro_batch_size') or mbs)
     gbs = int(config.get('global_batch_size', 256))
     seq_len = int(config.get('seq_len', 4096))
@@ -146,7 +153,7 @@ fi'''
     whole_script += script_attention(backend_env_block, attention_backend, attention_mask, window_size)
     whole_script += script_model(num_layers, hidden, ffn, heads, kv_heads)
     whole_script += script_training(eval_interval, eval_iters, lr_warmup_iters)
-    whole_script += script_rest(tp, pp)
+    whole_script += script_rest(tp, pp, config)
 
     whole_script += f'{logging_extra})'
     whole_script += rachita_extra_args(config, context_parallel_size)
@@ -326,6 +333,8 @@ def profiling_args(config):
         ]
     else:
         flags = []
+    if config['activation_offloading']:
+        flags += [f'--cpu-offloading-num-layers {config["transformer_dimensions"]["num_layers"]-1}']
 
     profiling_args_string = '\n'.join(
         [f'    {s}' for s in flags]
@@ -457,23 +466,34 @@ def script_setup(config):
     transformer_engine_flags = [
         '--transformer-impl transformer_engine',
     ]
+
+    # Check the zero_stage from config
+    zero_stage = config.get('zero_stage', 1)
+
+    # NVIDIA recommends disabling this (setting to 1) for FSDP to allow proper stream overlap
+    cuda_connections = 1 if zero_stage >= 2 else 8
+
     if config['precision'] == 'bf16':
-        transformer_engine_flags += [
-            '--use-precision-aware-optimizer',
-            '--main-grads-dtype bf16',
-        ]
+        if zero_stage == 1:
+            transformer_engine_flags.append('--main-grads-dtype bf16')
+            transformer_engine_flags.append('--use-precision-aware-optimizer')
+        if zero_stage >= 2:
+            # Crucial for fixing the Float32/BF16 gradient type mismatch
+            transformer_engine_flags.append('--grad-reduce-in-bf16')
+
     elif config['precision'] == 'fp8_transformer_engine':
         transformer_engine_flags += [
             '--fp8-format hybrid',
             '--fp8-recipe tensorwise',
             '--fp8-param-gather',
-            # Not sure if these options are good with fp8 either
-            '--main-grads-dtype bf16',
-            '--use-precision-aware-optimizer',
-            # Reconsider if we should have this
             '--attention-softmax-in-fp32',
         ]
-        # TODO: I think we might need --tp-comm-overlap with fp8 if we are doing tensorparallel
+        if zero_stage == 1:
+            transformer_engine_flags.append('--main-grads-dtype bf16')
+            transformer_engine_flags.append('--use-precision-aware-optimizer')
+        if zero_stage >= 2:
+            # Must also be included here if running FSDP with FP8/BF16 mixed states
+            transformer_engine_flags.append('--grad-reduce-in-bf16')
     else:
         raise ValueError(f'Precision training not implemented yet: {config["precision"]}.')
 
@@ -514,7 +534,7 @@ export TRITON_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/.triton_cache
 export TORCHINDUCTOR_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/.inductor_cache
 export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK/SLURM_GPUS_PER_NODE))
 MASTER_ADDR=$(hostname)
-MASTER_PORT=25678
+MASTER_PORT=29500
 
 echo "Megatron commit: $(git -C $MEGATRON_LM_DIR rev-parse --short HEAD)"
 echo "Attention preset/backend: $ATTN_PRESET/$ATTN_BACKEND mask=$ATTN_MASK window=$WINDOW_SIZE seq=$SEQ_LEN mbs=$MBS gbs=$GBS tp=$TP pp=$PP"
@@ -593,31 +613,39 @@ LEARNING_RATE_ARGS=(
 '''
 
 
-def script_rest(tp, pp):
+def script_rest(tp, pp, config):
+    zero_stage = config.get('zero_stage', 1)
+
+    zero_args = "" # Just DDP
+
+    if zero_stage == 1: # Default one btw
+        zero_args = "\n    --use-distributed-optimizer\n    --overlap-grad-reduce\n    --overlap-param-gather"
+    elif zero_stage == 2:
+        zero_args = "\n    --use-megatron-fsdp\n    --data-parallel-sharding-strategy optim_grads\n    --no-gradient-accumulation-fusion\n    --use-distributed-optimizer\n    --overlap-grad-reduce\n    --overlap-param-gather --ckpt-format fsdp_dtensor"
+    elif zero_stage == 3:
+        zero_args = "\n    --use-megatron-fsdp\n    --data-parallel-sharding-strategy optim_grads_params\n    --no-gradient-accumulation-fusion\n    --use-distributed-optimizer\n    --overlap-grad-reduce\n    --overlap-param-gather --ckpt-format fsdp_dtensor"
+    elif zero_stage != 0:
+        raise ValueError("zero_stage in config must be 0, 1, 2, or 3.")
+
     return f'''
-INITIALIZATION_ARGS=(
-    --seed 42
-    --init-method-std 0.02
-)
+    INITIALIZATION_ARGS=(
+        --seed 42
+        --init-method-std 0.02
+    )
 
-MIXED_PRECISION_ARGS=(
-    --bf16
-)
+    MIXED_PRECISION_ARGS=(
+        --bf16
+    )
 
-DISTRIBUTED_ARGS=(
-    --tensor-model-parallel-size {tp}
-    --pipeline-model-parallel-size {pp}
-    --use-distributed-optimizer
-    --overlap-grad-reduce
-    --overlap-param-gather
-)
+    DISTRIBUTED_ARGS=(
+        --tensor-model-parallel-size {tp}
+        --pipeline-model-parallel-size {pp}{zero_args}
+    )
 
-LOGGING_ARGS=(
-    --log-throughput
-    --log-progress
-
-'''
-
+    LOGGING_ARGS=(
+        --log-throughput
+        --log-progress
+    '''
 
 def script_tokenizer(config=None):
     # Switch to Rachita's wrapper entrypoint only when a Rachita-only feature is
