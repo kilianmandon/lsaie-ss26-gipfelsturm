@@ -1,5 +1,5 @@
 # Victor options
-zero_stage: 1
+zero_stage: 3
 memory_profiling: false
 activation_offloading: true
 
@@ -8,8 +8,10 @@ account: lsaie-ss26
 partition: debug
 seq_len: 4096
 global_batch_size: 256
-micro_batch_size: 2
+micro_batch_size: 4
+tensor_parallel_size: 1
+pipeline_parallel_size: 1
 
 # Lingfeng attention benchmark options
 # attention_preset: auto, flash, fa3, fa4, cudnn, or unfused
-walltime: "00:15:00"
+walltime: "00:10:00"

@@ -1,5 +1,5 @@
 # Victor options
-zero_stage: 0
+zero_stage: 1
 memory_profiling: false
 activation_offloading: false
 
